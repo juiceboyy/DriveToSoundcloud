@@ -1,0 +1,174 @@
+import 'dotenv/config';
+import { google } from 'googleapis';
+import FormData from 'form-data';
+import { Readable } from 'stream';
+import { fileURLToPath } from 'url';
+import { getAuthenticatedClient } from '../auth/google.js';
+import { getAccessToken } from '../auth/soundcloud.js';
+import { fetchWithRetry } from '../utils/fetchWithRetry.js';
+
+const PRODUCING_FOLDER = 'producing';
+const PLAYLIST_NAME = 'CarPlay Mixes';
+const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.aiff']);
+const SC_BASE = 'https://api.soundcloud.com';
+
+const MIME_TYPES = {
+  '.wav': 'audio/wav',
+  '.mp3': 'audio/mpeg',
+  '.aiff': 'audio/aiff',
+};
+
+// ── Google Drive helpers ──────────────────────────────────────────────────────
+
+function getExtension(filename) {
+  const idx = filename.lastIndexOf('.');
+  return idx !== -1 ? filename.slice(idx).toLowerCase() : '';
+}
+
+async function findDriveFolder(drive, name) {
+  const { data } = await drive.files.list({
+    q: `name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    fields: 'files(id, name)',
+    pageSize: 1,
+  });
+  const [folder] = data.files;
+  if (!folder) throw new Error(`Drive folder "${name}" not found.`);
+  return folder;
+}
+
+async function listSubfolders(drive, parentId) {
+  const { data } = await drive.files.list({
+    q: `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    fields: 'files(id, name)',
+    orderBy: 'name',
+  });
+  return data.files;
+}
+
+async function listAudioFiles(drive, folderId) {
+  const { data } = await drive.files.list({
+    q: `'${folderId}' in parents and trashed=false`,
+    fields: 'files(id, name)',
+    orderBy: 'name',
+  });
+  return data.files.filter(f => AUDIO_EXTENSIONS.has(getExtension(f.name)));
+}
+
+async function getDriveStream(drive, fileId) {
+  const res = await drive.files.get(
+    { fileId, alt: 'media' },
+    { responseType: 'stream' },
+  );
+  return res.data; // Node.js Readable — never buffered
+}
+
+// ── SoundCloud helpers ────────────────────────────────────────────────────────
+
+function scHeaders(accessToken) {
+  return { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' };
+}
+
+async function ensurePlaylist(accessToken) {
+  const res = await fetchWithRetry(`${SC_BASE}/me/playlists?limit=200`, {
+    headers: scHeaders(accessToken),
+  });
+  const playlists = await res.json();
+
+  const existing = playlists.find(p => p.title === PLAYLIST_NAME);
+  if (existing) return existing.id;
+
+  const createRes = await fetchWithRetry(`${SC_BASE}/playlists`, {
+    method: 'POST',
+    headers: { ...scHeaders(accessToken), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ playlist: { title: PLAYLIST_NAME, sharing: 'private', tracks: [] } }),
+  });
+  const { id } = await createRes.json();
+  console.log(`  Created playlist "${PLAYLIST_NAME}" (ID: ${id})`);
+  return id;
+}
+
+async function addTrackToPlaylist(accessToken, playlistId, trackId) {
+  const getRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
+    headers: scHeaders(accessToken),
+  });
+  const playlist = await getRes.json();
+  const updatedTracks = [...(playlist.tracks ?? []).map(t => ({ id: t.id })), { id: trackId }];
+
+  await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
+    method: 'PUT',
+    headers: { ...scHeaders(accessToken), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ playlist: { tracks: updatedTracks } }),
+  });
+}
+
+async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename }) {
+  const ext = getExtension(filename);
+  const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
+
+  // Build multipart body from the drive stream — no buffering, lazily piped
+  const form = new FormData();
+  form.append('track[title]', trackTitle);
+  form.append('track[artist]', artistName);
+  form.append('track[sharing]', 'private');
+  form.append('track[asset_data]', driveStream, { filename, contentType });
+
+  // Convert Node Readable → Web ReadableStream for native fetch
+  const res = await fetchWithRetry(
+    `${SC_BASE}/tracks`,
+    {
+      method: 'POST',
+      headers: { ...scHeaders(accessToken), ...form.getHeaders() },
+      body: Readable.toWeb(form),
+      duplex: 'half', // required for streaming POST in Node 18+
+    },
+    { retries: 0 }, // streams are not replayable; surface errors immediately
+  );
+  return res.json();
+}
+
+// ── Main pipeline ─────────────────────────────────────────────────────────────
+
+export async function sync() {
+  const [driveClient, accessToken] = await Promise.all([
+    getAuthenticatedClient(),
+    getAccessToken(),
+  ]);
+
+  const drive = google.drive({ version: 'v3', auth: driveClient });
+
+  const producingFolder = await findDriveFolder(drive, PRODUCING_FOLDER);
+  console.log(`Found Drive folder: "${producingFolder.name}" (${producingFolder.id})`);
+
+  const playlistId = await ensurePlaylist(accessToken);
+  console.log(`Playlist "${PLAYLIST_NAME}" ready (ID: ${playlistId})\n`);
+
+  const subfolders = await listSubfolders(drive, producingFolder.id);
+
+  for (const subfolder of subfolders) {
+    const artistName = subfolder.name;
+    const audioFiles = await listAudioFiles(drive, subfolder.id);
+
+    if (audioFiles.length === 0) continue;
+    console.log(`[${artistName}] — ${audioFiles.length} track(s)`);
+
+    for (const file of audioFiles) {
+      const ext = getExtension(file.name);
+      const trackTitle = file.name.slice(0, file.name.length - ext.length);
+
+      process.stdout.write(`  ↑ ${trackTitle} … `);
+
+      const driveStream = await getDriveStream(drive, file.id);
+      const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name });
+      await addTrackToPlaylist(accessToken, playlistId, track.id);
+
+      console.log(`✓ (ID: ${track.id})`);
+    }
+  }
+
+  console.log('\nSync complete.');
+}
+
+// Run directly via: npm run sync
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  sync().catch(err => { console.error(err.message); process.exit(1); });
+}
