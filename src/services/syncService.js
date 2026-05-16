@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
 import { fetchWithRetry } from '../utils/fetchWithRetry.js';
+import { loadState, isSynced, markSynced } from '../utils/syncState.js';
 
 const PRODUCING_FOLDER = 'producing';
 const PLAYLIST_NAME = 'CarPlay Mixes';
@@ -143,6 +144,7 @@ export async function sync() {
   console.log(`Playlist "${PLAYLIST_NAME}" ready (ID: ${playlistId})\n`);
 
   const subfolders = await listSubfolders(drive, producingFolder.id);
+  const state = await loadState();
 
   for (const subfolder of subfolders) {
     const artistName = subfolder.name;
@@ -155,11 +157,17 @@ export async function sync() {
       const ext = getExtension(file.name);
       const trackTitle = file.name.slice(0, file.name.length - ext.length);
 
+      if (isSynced(state, file.id)) {
+        console.log(`  [SKIPPED] ${trackTitle} - already synced`);
+        continue;
+      }
+
       process.stdout.write(`  ↑ ${trackTitle} … `);
 
       const driveStream = await getDriveStream(drive, file.id);
       const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name });
       await addTrackToPlaylist(accessToken, playlistId, track.id);
+      await markSynced(state, file.id, track.id);
 
       console.log(`✓ (ID: ${track.id})`);
     }
