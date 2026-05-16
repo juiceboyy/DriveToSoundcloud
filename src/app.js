@@ -1,11 +1,18 @@
 import 'dotenv/config';
 import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import * as googleAuth from './auth/google.js';
 import * as soundcloudAuth from './auth/soundcloud.js';
 import { getToken } from './utils/tokenStore.js';
+import { sync } from './services/syncService.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 const PORT = process.env.PORT ?? 3000;
+
+app.use(express.static(path.join(__dirname, '../public')));
 
 // ── Google Drive OAuth2 ───────────────────────────────────────────────────────
 
@@ -55,6 +62,33 @@ app.get('/status', async (_req, res) => {
     google: google ? 'authenticated' : 'not authenticated',
     soundcloud: soundcloud ? 'authenticated' : 'not authenticated',
   });
+});
+
+// ── Sync API ──────────────────────────────────────────────────────────────────
+
+let isSyncing = false;
+
+app.post('/api/sync', async (_req, res) => {
+  if (isSyncing) {
+    return res.status(409).json({ error: 'Sync already in progress.' });
+  }
+
+  isSyncing = true;
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  const send = (type, data) => res.write(JSON.stringify({ type, data }) + '\n');
+
+  try {
+    await sync((msg) => send('log', msg));
+    send('done', null);
+  } catch (err) {
+    send('error', err.message);
+  } finally {
+    isSyncing = false;
+    res.end();
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

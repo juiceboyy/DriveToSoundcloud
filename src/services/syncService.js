@@ -69,7 +69,7 @@ function scHeaders(accessToken) {
   return { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' };
 }
 
-async function ensurePlaylist(accessToken) {
+async function ensurePlaylist(accessToken, log) {
   const res = await fetchWithRetry(`${SC_BASE}/me/playlists?limit=200`, {
     headers: scHeaders(accessToken),
   });
@@ -84,7 +84,7 @@ async function ensurePlaylist(accessToken) {
     body: JSON.stringify({ playlist: { title: PLAYLIST_NAME, sharing: 'private', tracks: [] } }),
   });
   const { id } = await createRes.json();
-  console.log(`  Created playlist "${PLAYLIST_NAME}" (ID: ${id})`);
+  log(`  Created playlist "${PLAYLIST_NAME}" (ID: ${id})`);
   return id;
 }
 
@@ -129,7 +129,7 @@ async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, f
 
 // ── Main pipeline ─────────────────────────────────────────────────────────────
 
-export async function sync() {
+export async function sync(log = console.log) {
   const [driveClient, accessToken] = await Promise.all([
     getAuthenticatedClient(),
     getAccessToken(),
@@ -138,10 +138,10 @@ export async function sync() {
   const drive = google.drive({ version: 'v3', auth: driveClient });
 
   const producingFolder = await findDriveFolder(drive, PRODUCING_FOLDER);
-  console.log(`Found Drive folder: "${producingFolder.name}" (${producingFolder.id})`);
+  log(`Found Drive folder: "${producingFolder.name}" (${producingFolder.id})`);
 
-  const playlistId = await ensurePlaylist(accessToken);
-  console.log(`Playlist "${PLAYLIST_NAME}" ready (ID: ${playlistId})\n`);
+  const playlistId = await ensurePlaylist(accessToken, log);
+  log(`Playlist "${PLAYLIST_NAME}" ready (ID: ${playlistId})\n`);
 
   const subfolders = await listSubfolders(drive, producingFolder.id);
   const state = await loadState();
@@ -151,29 +151,29 @@ export async function sync() {
     const audioFiles = await listAudioFiles(drive, subfolder.id);
 
     if (audioFiles.length === 0) continue;
-    console.log(`[${artistName}] — ${audioFiles.length} track(s)`);
+    log(`[${artistName}] — ${audioFiles.length} track(s)`);
 
     for (const file of audioFiles) {
       const ext = getExtension(file.name);
       const trackTitle = file.name.slice(0, file.name.length - ext.length);
 
       if (isSynced(state, file.id)) {
-        console.log(`  [SKIPPED] ${trackTitle} - already synced`);
+        log(`  [SKIPPED] ${trackTitle} - already synced`);
         continue;
       }
 
-      process.stdout.write(`  ↑ ${trackTitle} … `);
+      log(`  ↑ ${trackTitle} …`);
 
       const driveStream = await getDriveStream(drive, file.id);
       const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name });
       await addTrackToPlaylist(accessToken, playlistId, track.id);
       await markSynced(state, file.id, track.id);
 
-      console.log(`✓ (ID: ${track.id})`);
+      log(`  ✓ ${trackTitle} (ID: ${track.id})`);
     }
   }
 
-  console.log('\nSync complete.');
+  log('\nSync complete.');
 }
 
 // Run directly via: npm run sync

@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DriveToSoundcloud</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d0d0d;
+      --surface: #161616;
+      --border: #252525;
+      --text: #d8d8d8;
+      --muted: #555;
+      --accent: #ff5500;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #e3b341;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 3rem 1rem 2rem;
+      gap: 1.75rem;
+    }
+
+    header { text-align: center; }
+
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+
+    header p {
+      margin-top: 0.35rem;
+      font-size: 0.7rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+    }
+
+    .status-row {
+      display: flex;
+      gap: 0.75rem;
+    }
+
+    .pill {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      padding: 0.3rem 0.85rem;
+      font-size: 0.68rem;
+      color: var(--muted);
+      letter-spacing: 0.03em;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+
+    .dot.ok  { background: var(--green); }
+    .dot.err { background: var(--red); }
+
+    #syncBtn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 0.65rem 2.75rem;
+      font-size: 0.85rem;
+      font-family: inherit;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+
+    #syncBtn:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
+    #syncBtn:active:not(:disabled) { transform: translateY(0); }
+    #syncBtn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    #statusMsg {
+      font-size: 0.7rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      height: 0.9rem;
+      transition: color 0.2s;
+    }
+
+    #statusMsg.ok  { color: var(--green); }
+    #statusMsg.err { color: var(--red); }
+
+    .console-wrap {
+      width: 100%;
+      max-width: 700px;
+    }
+
+    .console-label {
+      font-size: 0.6rem;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 0.4rem;
+      padding-left: 0.25rem;
+    }
+
+    #console {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.1rem;
+      min-height: 220px;
+      max-height: 420px;
+      overflow-y: auto;
+      font-size: 0.72rem;
+      line-height: 1.75;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    #console::-webkit-scrollbar { width: 4px; }
+    #console::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .line { white-space: pre-wrap; word-break: break-all; color: var(--muted); }
+    .line.info { color: var(--text); }
+    .line.ok   { color: var(--green); }
+    .line.err  { color: var(--red); }
+    .line.skip { color: var(--muted); font-style: italic; }
+    .line.up   { color: var(--yellow); }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>DriveToSoundcloud</h1>
+    <p>Sync mixdowns van Google Drive naar SoundCloud</p>
+  </header>
+
+  <div class="status-row">
+    <div class="pill">
+      <div class="dot" id="dotGoogle"></div>
+      <span>Google Drive</span>
+    </div>
+    <div class="pill">
+      <div class="dot" id="dotSC"></div>
+      <span>SoundCloud</span>
+    </div>
+  </div>
+
+  <button id="syncBtn">Start Sync</button>
+  <div id="statusMsg"></div>
+
+  <div class="console-wrap">
+    <div class="console-label">Log</div>
+    <div id="console">
+      <div class="line">Klaar om te syncen…</div>
+    </div>
+  </div>
+
+  <script>
+    const btn       = document.getElementById('syncBtn');
+    const log       = document.getElementById('console');
+    const statusMsg = document.getElementById('statusMsg');
+
+    function setStatus(text, cls = '') {
+      statusMsg.textContent = text;
+      statusMsg.className = cls;
+    }
+
+    function setDot(id, ok) {
+      document.getElementById(id).className = 'dot ' + (ok ? 'ok' : 'err');
+    }
+
+    function appendLine(text, cls = '') {
+      const div = document.createElement('div');
+      div.className = 'line ' + cls;
+      div.textContent = text;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function classifyLine(text) {
+      if (text.includes('[SKIPPED]'))        return 'skip';
+      if (text.includes('↑'))               return 'up';
+      if (text.includes('✓') || text.includes('Sync complete') || text.includes('ready')) return 'ok';
+      return 'info';
+    }
+
+    async function refreshStatus() {
+      try {
+        const res  = await fetch('/status');
+        const data = await res.json();
+        setDot('dotGoogle', data.google      === 'authenticated');
+        setDot('dotSC',     data.soundcloud  === 'authenticated');
+      } catch { /* server not ready yet */ }
+    }
+
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      log.innerHTML = '';
+      setStatus('Bezig met synchroniseren…');
+
+      try {
+        const res = await fetch('/api/sync', { method: 'POST' });
+
+        if (res.status === 409) {
+          appendLine('Sync is al bezig — wacht tot de huidige run klaar is.', 'err');
+          setStatus('Al bezig.', 'err');
+          return;
+        }
+
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let   buf     = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop();
+
+          for (const raw of lines) {
+            const trimmed = raw.trim();
+            if (!trimmed) continue;
+            try {
+              const { type, data } = JSON.parse(trimmed);
+              if (type === 'log') {
+                appendLine(data, classifyLine(data));
+              } else if (type === 'done') {
+                appendLine('✓ Sync voltooid.', 'ok');
+                setStatus('Sync voltooid.', 'ok');
+                await refreshStatus();
+              } else if (type === 'error') {
+                appendLine('✗ ' + data, 'err');
+                setStatus('Sync mislukt.', 'err');
+              }
+            } catch { /* malformed line */ }
+          }
+        }
+      } catch (err) {
+        appendLine('Netwerkfout: ' + err.message, 'err');
+        setStatus('Fout opgetreden.', 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    refreshStatus();
+  </script>
+</body>
+</html>
