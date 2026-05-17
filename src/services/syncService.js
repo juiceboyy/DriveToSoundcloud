@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
 import { fetchWithRetry } from '../utils/fetchWithRetry.js';
-import { loadState, isSynced, markSynced } from '../utils/syncState.js';
+import { loadState, isSynced, markSynced, getStoredTrackId, getStoredModifiedTime } from '../utils/syncState.js';
 
 const PRODUCING_FOLDER = 'producing';
 const MIME_TYPES = { '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.aiff': 'audio/aiff' };
@@ -40,13 +40,27 @@ async function listSubfolders(drive, parentId) {
   return data.files;
 }
 
+async function findBouncesFolder(drive, parentId) {
+  const { data } = await drive.files.list({
+    q: `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and name='Bounces' and trashed=false`,
+    fields: 'files(id)',
+    pageSize: 1,
+  });
+  return data.files[0] ?? null;
+}
+
 async function listAudioFiles(drive, folderId) {
   const { data } = await drive.files.list({
     q: `'${folderId}' in parents and trashed=false`,
-    fields: 'files(id, name, size)',
+    fields: 'files(id, name, size, createdTime, modifiedTime)',
     orderBy: 'name',
   });
-  return data.files.filter(f => AUDIO_EXTENSIONS.has(getExtension(f.name)));
+  return data.files.filter(f => {
+    if (!AUDIO_EXTENSIONS.has(getExtension(f.name))) return false;
+    const year = (d) => new Date(d).getFullYear();
+    // Skip files not touched in 2026 or later
+    return year(f.createdTime) >= 2026 || year(f.modifiedTime) >= 2026;
+  });
 }
 
 async function getDriveStream(drive, fileId) {
@@ -106,6 +120,17 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
   if (!putRes.ok) {
     const errText = await putRes.text();
     throw new Error(`Playlist update failed: ${putRes.status} - ${errText}`);
+  }
+}
+
+async function deleteTrack(accessToken, trackId) {
+  const res = await fetchWithRetry(`${SC_BASE}/tracks/${trackId}`, {
+    method: 'DELETE',
+    headers: scHeaders(accessToken),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Delete track failed: ${res.status} - ${errText}`);
   }
 }
 
@@ -188,14 +213,23 @@ export async function sync(log = console.log) {
 
   const subfolders = await listSubfolders(drive, producingFolder.id);
   const state = await loadState();
-  let processedCount = 0;
 
   for (const subfolder of subfolders) {
     const artistName = subfolder.name;
-    const audioFiles = await listAudioFiles(drive, subfolder.id);
+
+    if (artistName === 'Admin') {
+      log(`[Admin] — skipped`);
+      continue;
+    }
+
+    const bouncesFolder = await findBouncesFolder(drive, subfolder.id);
+    const sourceFolderId = bouncesFolder ? bouncesFolder.id : subfolder.id;
+    const sourceLabel = bouncesFolder ? `${artistName}/Bounces` : artistName;
+
+    const audioFiles = await listAudioFiles(drive, sourceFolderId);
 
     if (audioFiles.length === 0) continue;
-    log(`[${artistName}] — ${audioFiles.length} track(s)`);
+    log(`[${sourceLabel}] — ${audioFiles.length} track(s)`);
 
     for (const file of audioFiles) {
       const ext = getExtension(file.name);
@@ -203,7 +237,20 @@ export async function sync(log = console.log) {
       const trackTitle = `${artistName} - ${rawTitle}`;
 
       if (isSynced(state, file.id)) {
-        log(`  [SKIPPED] ${trackTitle} - already synced`);
+        const storedModified = getStoredModifiedTime(state, file.id);
+        if (storedModified && file.modifiedTime > storedModified) {
+          const oldTrackId = getStoredTrackId(state, file.id);
+          log(`  [UPDATE] Nieuwe versie gedetecteerd voor ${trackTitle}, oude track wordt verwijderd...`);
+          await deleteTrack(accessToken, oldTrackId);
+
+          const driveStream = await getDriveStream(drive, file.id);
+          const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
+          await addTrackToPlaylist(accessToken, playlistId, track.id);
+          await markSynced(state, file.id, track.id, file.modifiedTime);
+          log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
+        } else {
+          log(`  [SKIPPED] ${trackTitle} - already synced`);
+        }
         continue;
       }
 
@@ -212,15 +259,8 @@ export async function sync(log = console.log) {
       const driveStream = await getDriveStream(drive, file.id);
       const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
       await addTrackToPlaylist(accessToken, playlistId, track.id);
-
-      await markSynced(state, file.id, track.id);
+      await markSynced(state, file.id, track.id, file.modifiedTime);
       log(`  ✓ ${trackTitle} (ID: ${track.id})`);
-
-      processedCount++;
-      if (processedCount >= 1) {
-        log('\n[TEST] 1 track succesvol geüpload en toegevoegd. Script wordt nu gestopt.');
-        return;
-      }
     }
   }
 

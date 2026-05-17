@@ -39,9 +39,10 @@ Both OAuth flows must be completed before sync will work:
 - Track title sent to SoundCloud is formatted as `"${artistName} - ${rawTitle}"`.
 - Uploads stream directly from Google Drive → SoundCloud using raw `https.request` (not `fetchWithRetry`) — streams are not replayable so retries are not possible.
 - Uploaded tracks are added to a SoundCloud playlist named `CarPlay Mixes` (created if missing). Playlist update reads existing tracks then PUTs the full list — it only appends, never removes.
-- **Note:** `syncService.js` currently has a hard-coded `processedCount >= 1` guard that stops after one upload per run (debug remnant — remove to enable full sync).
+- **Crawl rules:** The `Admin` subfolder is always skipped. Within each artist folder, if a `Bounces` subfolder exists, audio files are sourced from there; otherwise from the artist folder directly.
+- **Date filter:** Only audio files with a `createdTime` or `modifiedTime` in 2026 or later are processed.
 
-**Idempotency:** `src/utils/syncState.js` maps Google Drive file IDs → SoundCloud track IDs in `.sync-state.json`. Files already in the map are skipped on subsequent runs.
+**Idempotency & versioning:** `src/utils/syncState.js` maps Google Drive file IDs → `{ scTrackId, modifiedTime }` in `.sync-state.json`. Files already in the map are skipped unless their `modifiedTime` has advanced — in that case the old SoundCloud track is deleted and re-uploaded. Legacy state entries (plain string values) are treated as synced with no known modification date.
 
 **Scheduler:** `src/utils/scheduler.js` — wraps `node-cron` to run sync every 15 minutes. Toggled via `POST /api/cron/toggle`; status via `GET /api/cron/status`. Background runs discard log output and silently skip if a manual sync is already in progress.
 
