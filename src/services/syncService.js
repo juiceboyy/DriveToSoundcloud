@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
+import https from 'https';
 import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
@@ -65,10 +66,6 @@ async function getDriveStream(drive, fileId) {
 
 function scHeaders(accessToken) {
   return { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' };
-}
-
-function scUploadHeaders(accessToken) {
-  return { Authorization: `OAuth ${accessToken}` };
 }
 
 async function ensurePlaylist(accessToken, log) {
@@ -142,24 +139,48 @@ async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, f
   const audioBuffer = await streamToBuffer(driveStream);
 
   const { body, contentType: multipartType } = buildMultipart(
-    { 'track[title]': trackTitle, 'track[artist]': artistName, 'track[sharing]': 'private' },
+    { 'track[title]': trackTitle, 'track[sharing]': 'private' },
     { fieldName: 'track[asset_data]', filename, contentType, buffer: audioBuffer },
   );
 
-  const res = await fetchWithRetry(
-    `${SC_BASE}/tracks`,
-    {
-      method: 'POST',
-      headers: {
-        ...scUploadHeaders(accessToken),
-        'Content-Type': multipartType,
-      },
-      body: new Uint8Array(body),
-    },
-    { retries: 0 },
-  );
-  return res.json();
+  const result = await httpsPost(`${SC_BASE}/tracks`, {
+    Authorization: `OAuth ${accessToken}`,
+    'Content-Type': multipartType,
+    'Content-Length': body.length,
+  }, body);
+
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(`HTTP ${result.status}: ${result.statusText} — ${result.body}`);
+  }
+  return JSON.parse(result.body);
 }
+
+function httpsRequest(method, url, headers, body) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = https.request({
+      hostname: u.hostname,
+      port: 443,
+      path: u.pathname + u.search,
+      method,
+      headers,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({
+        status: res.statusCode,
+        statusText: res.statusMessage,
+        body: Buffer.concat(chunks).toString('utf8'),
+      }));
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+const httpsPost = (url, headers, body) => httpsRequest('POST', url, headers, body);
+const httpsPut  = (url, headers, body) => httpsRequest('PUT',  url, headers, body);
 
 // ── Main pipeline ─────────────────────────────────────────────────────────────
 
