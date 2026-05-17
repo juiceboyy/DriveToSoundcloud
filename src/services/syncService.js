@@ -200,6 +200,7 @@ export async function sync(log = console.log) {
 
   const subfolders = await listSubfolders(drive, producingFolder.id);
   const state = await loadState();
+  let processedCount = 0;
 
   for (const subfolder of subfolders) {
     const artistName = subfolder.name;
@@ -225,6 +226,12 @@ export async function sync(log = console.log) {
 
       await markSynced(state, file.id, track.id);
       log(`  ✓ ${trackTitle} (ID: ${track.id})`);
+
+      processedCount++;
+      if (processedCount >= 1) {
+        log('\n[TEST] 1 track succesvol geüpload en toegevoegd. Script wordt nu gestopt.');
+        return;
+      }
     }
   }
 
