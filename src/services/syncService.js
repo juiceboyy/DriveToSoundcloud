@@ -123,6 +123,27 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
   }
 }
 
+async function sendNotification(message) {
+  const user = process.env.PUSHOVER_USER_KEY;
+  const token = process.env.PUSHOVER_APP_TOKEN;
+  if (!user || !token) return;
+
+  const params = new URLSearchParams();
+  params.append('token', token);
+  params.append('user', user);
+  params.append('message', message);
+  params.append('title', '🚗 CarPlay Sync');
+
+  try {
+    await fetchWithRetry('https://api.pushover.net/1/messages.json', {
+      method: 'POST',
+      body: params,
+    });
+  } catch (err) {
+    console.warn(`  [WAARSCHUWING] Kon push notificatie niet versturen: ${err.message}`);
+  }
+}
+
 async function deleteTrack(accessToken, trackId) {
   const res = await fetchWithRetry(`${SC_BASE}/tracks/${trackId}`, {
     method: 'DELETE',
@@ -247,6 +268,7 @@ export async function sync(log = console.log) {
           const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
           await addTrackToPlaylist(accessToken, playlistId, track.id);
           await markSynced(state, file.id, track.id, file.modifiedTime);
+          await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
           log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
         } else {
           log(`  [SKIPPED] ${trackTitle} - already synced`);
@@ -260,6 +282,7 @@ export async function sync(log = console.log) {
       const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
       await addTrackToPlaylist(accessToken, playlistId, track.id);
       await markSynced(state, file.id, track.id, file.modifiedTime);
+      await sendNotification(`✅ Nieuwe mix:\n${trackTitle}`);
       log(`  ✓ ${trackTitle} (ID: ${track.id})`);
     }
   }
