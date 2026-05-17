@@ -170,23 +170,6 @@ async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, f
   });
 }
 
-async function updateTrackMetadata(accessToken, trackId, artistName) {
-  const params = new URLSearchParams();
-  params.append('track[publisher_metadata][artist]', artistName);
-  params.append('track[publisher_metadata][contains_music]', 'true');
-
-  const res = await fetchWithRetry(`${SC_BASE}/tracks/${trackId}`, {
-    method: 'PUT',
-    headers: scHeaders(accessToken),
-    body: params,
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    console.warn(`  [WAARSCHUWING] Kon Main Artist niet updaten voor track ${trackId}: ${res.status} - ${errText}`);
-  }
-}
-
 // ── Main pipeline ─────────────────────────────────────────────────────────────
 
 export async function sync(log = console.log) {
@@ -216,7 +199,8 @@ export async function sync(log = console.log) {
 
     for (const file of audioFiles) {
       const ext = getExtension(file.name);
-      const trackTitle = file.name.slice(0, file.name.length - ext.length);
+      const rawTitle = file.name.slice(0, file.name.length - ext.length);
+      const trackTitle = `${artistName} - ${rawTitle}`;
 
       if (isSynced(state, file.id)) {
         log(`  [SKIPPED] ${trackTitle} - already synced`);
@@ -227,7 +211,6 @@ export async function sync(log = console.log) {
 
       const driveStream = await getDriveStream(drive, file.id);
       const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-      await updateTrackMetadata(accessToken, track.id, artistName);
       await addTrackToPlaylist(accessToken, playlistId, track.id);
 
       await markSynced(state, file.id, track.id);
