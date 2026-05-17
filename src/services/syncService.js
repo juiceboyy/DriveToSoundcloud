@@ -59,39 +59,6 @@ async function getDriveStream(drive, fileId) {
 
 // ── SoundCloud helpers ────────────────────────────────────────────────────────
 
-function httpsJson(method, urlStr, accessToken, payloadObj) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const payloadStr = JSON.stringify(payloadObj);
-    const req = https.request({
-      hostname: u.hostname,
-      port: 443,
-      path: u.pathname + u.search,
-      method,
-      headers: {
-        Authorization: `OAuth ${accessToken}`,
-        Accept: 'application/json',
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Length': Buffer.byteLength(payloadStr),
-      },
-    }, (res) => {
-      let body = '';
-      res.on('data', c => { body += c; });
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(body)); }
-          catch { reject(new Error(`Invalid JSON: ${body}`)); }
-        } else {
-          reject(new Error(`HTTP ${res.statusCode} — ${body}`));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.write(payloadStr);
-    req.end();
-  });
-}
-
 function scHeaders(accessToken) {
   return { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' };
 }
@@ -105,11 +72,19 @@ async function ensurePlaylist(accessToken, log) {
   const existing = playlists.find(p => p.title === PLAYLIST_NAME);
   if (existing) return existing.id;
 
-  const createRes = await httpsJson('POST', `${SC_BASE}/playlists`, accessToken, {
-    playlist: { title: PLAYLIST_NAME, sharing: 'private', tracks: [] },
+  const params = new URLSearchParams();
+  params.append('playlist[title]', PLAYLIST_NAME);
+  params.append('playlist[sharing]', 'private');
+
+  const createRes = await fetchWithRetry(`${SC_BASE}/playlists`, {
+    method: 'POST',
+    headers: { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' },
+    body: params,
   });
-  log(`  Created playlist "${PLAYLIST_NAME}" (ID: ${createRes.id})`);
-  return createRes.id;
+
+  const data = await createRes.json();
+  log(`  Created playlist "${PLAYLIST_NAME}" (ID: ${data.id})`);
+  return data.id;
 }
 
 async function addTrackToPlaylist(accessToken, playlistId, trackId) {
@@ -117,11 +92,21 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
     headers: scHeaders(accessToken),
   });
   const playlist = await getRes.json();
-  const updatedTracks = [...(playlist.tracks ?? []).map(t => ({ id: t.id })), { id: trackId }];
 
-  await httpsJson('PUT', `${SC_BASE}/playlists/${playlistId}`, accessToken, {
-    playlist: { tracks: updatedTracks },
+  const trackIds = [...(playlist.tracks ?? []).map(t => t.id), trackId];
+  const params = new URLSearchParams();
+  trackIds.forEach(id => params.append('playlist[tracks][][id]', id));
+
+  const putRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
+    method: 'PUT',
+    headers: { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' },
+    body: params,
   });
+
+  if (!putRes.ok) {
+    const errText = await putRes.text();
+    throw new Error(`Playlist update failed: ${putRes.status} - ${errText}`);
+  }
 }
 
 async function uploadTrack(accessToken, { trackTitle, driveStream, filename, fileSize }) {
