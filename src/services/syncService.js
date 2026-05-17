@@ -97,13 +97,17 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
 }
 
 async function uploadTrack(accessToken, { trackTitle, driveStream, filename, fileSize }) {
+  if (!fileSize || isNaN(fileSize)) {
+    throw new Error(`Kan track niet uploaden: ongeldige bestandsgrootte (${fileSize}) voor ${filename}`);
+  }
+
   const ext = getExtension(filename);
   const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
   const boundary = '----SoundCloudBoundary' + Date.now().toString(16);
   const CRLF = '\r\n';
-  const safeFilename = filename.replace(/"/g, '');
+  const safeFilename = 'upload' + ext;
 
-  const fields = { 'track[title]': trackTitle, 'track[sharing]': 'private' };
+  const fields = { 'track[title]': trackTitle.trim(), 'track[sharing]': 'private' };
   let header = '';
   for (const [name, value] of Object.entries(fields)) {
     header += `--${boundary}${CRLF}`;
