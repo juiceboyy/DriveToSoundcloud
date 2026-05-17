@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
-import { Blob } from 'node:buffer';
+import https from 'https';
 import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
@@ -43,7 +43,7 @@ async function listSubfolders(drive, parentId) {
 async function listAudioFiles(drive, folderId) {
   const { data } = await drive.files.list({
     q: `'${folderId}' in parents and trashed=false`,
-    fields: 'files(id, name)',
+    fields: 'files(id, name, size)',
     orderBy: 'name',
   });
   return data.files.filter(f => AUDIO_EXTENSIONS.has(getExtension(f.name)));
@@ -96,38 +96,58 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
   });
 }
 
-async function uploadTrack(accessToken, { trackTitle, driveStream, filename }) {
+async function uploadTrack(accessToken, { trackTitle, driveStream, filename, fileSize }) {
   const ext = getExtension(filename);
   const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
-
-  const chunks = [];
-  for await (const chunk of driveStream) chunks.push(chunk);
-  const blob = new Blob([Buffer.concat(chunks)], { type: contentType });
-
+  const boundary = '----SoundCloudBoundary' + Date.now().toString(16);
+  const CRLF = '\r\n';
   const safeFilename = filename.replace(/"/g, '');
-  const formData = new FormData();
-  formData.append('track[title]', trackTitle);
-  formData.append('track[sharing]', 'private');
-  formData.append('track[asset_data]', blob, safeFilename);
 
-  const response = await fetchWithRetry(`${SC_BASE}/tracks`, {
-    method: 'POST',
-    headers: {
-      Authorization: `OAuth ${accessToken}`,
-      Accept: 'application/json',
-    },
-    body: formData,
-  }, { retries: 0 });
-
-  const resultBody = await response.text();
-  let track;
-  try {
-    track = JSON.parse(resultBody);
-  } catch {
-    throw new Error(`Upload failed — SoundCloud returned non-JSON: ${resultBody.slice(0, 500)}`);
+  const fields = { 'track[title]': trackTitle, 'track[sharing]': 'private' };
+  let header = '';
+  for (const [name, value] of Object.entries(fields)) {
+    header += `--${boundary}${CRLF}`;
+    header += `Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}`;
+    header += `${value}${CRLF}`;
   }
-  if (!track.id) throw new Error(`Upload failed: ${JSON.stringify(track)}`);
-  return track;
+  header += `--${boundary}${CRLF}`;
+  header += `Content-Disposition: form-data; name="track[asset_data]"; filename="${safeFilename}"${CRLF}`;
+  header += `Content-Type: ${contentType}${CRLF}${CRLF}`;
+  const footer = `${CRLF}--${boundary}--${CRLF}`;
+
+  const totalLength = Buffer.byteLength(header) + fileSize + Buffer.byteLength(footer);
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.soundcloud.com',
+      port: 443,
+      path: '/tracks',
+      method: 'POST',
+      headers: {
+        Authorization: `OAuth ${accessToken}`,
+        Accept: 'application/json',
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': totalLength,
+      },
+    }, (res) => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(body)); }
+          catch { reject(new Error(`Upload failed — SoundCloud returned non-JSON: ${body.slice(0, 500)}`)); }
+        } else {
+          reject(new Error(`HTTP ${res.statusCode} — ${body}`));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(header);
+    driveStream.pipe(req, { end: false });
+    driveStream.on('end', () => { req.end(footer); });
+    driveStream.on('error', (err) => { req.destroy(err); reject(err); });
+  });
 }
 
 // ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -168,7 +188,7 @@ export async function sync(log = console.log) {
       log(`  ↑ ${trackTitle} …`);
 
       const driveStream = await getDriveStream(drive, file.id);
-      const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name });
+      const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
       await addTrackToPlaylist(accessToken, playlistId, track.id);
       await markSynced(state, file.id, track.id);
 
