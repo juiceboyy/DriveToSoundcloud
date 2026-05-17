@@ -6,6 +6,7 @@ import * as googleAuth from './auth/google.js';
 import * as soundcloudAuth from './auth/soundcloud.js';
 import { getToken } from './utils/tokenStore.js';
 import { sync } from './services/syncService.js';
+import { start as startScheduler, stop as stopScheduler, isActive as schedulerActive } from './utils/scheduler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -89,6 +90,29 @@ app.post('/api/sync', async (_req, res) => {
     isSyncing = false;
     res.end();
   }
+});
+
+// ── Scheduler API ─────────────────────────────────────────────────────────────
+
+app.get('/api/cron/status', (_req, res) => {
+  res.json({ active: schedulerActive() });
+});
+
+app.post('/api/cron/toggle', (_req, res) => {
+  if (schedulerActive()) {
+    stopScheduler();
+  } else {
+    startScheduler(async () => {
+      if (isSyncing) return; // silently skip if a manual sync is running
+      isSyncing = true;
+      try {
+        await sync(() => {}); // background — log output is discarded
+      } finally {
+        isSyncing = false;
+      }
+    });
+  }
+  res.json({ active: schedulerActive() });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

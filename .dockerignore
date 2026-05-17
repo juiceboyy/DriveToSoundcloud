@@ -1,0 +1,7 @@
+node_modules/
+.git/
+.env
+.tokens.json
+.sync-state.json
+README.md
+CLAUDE.md

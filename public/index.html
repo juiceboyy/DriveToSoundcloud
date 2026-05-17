@@ -97,6 +97,37 @@
     #syncBtn:active:not(:disabled) { transform: translateY(0); }
     #syncBtn:disabled { opacity: 0.35; cursor: not-allowed; }
 
+    .auto-row {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-size: 0.68rem;
+      color: var(--muted);
+      letter-spacing: 0.03em;
+    }
+
+    /* toggle switch */
+    .switch { position: relative; display: inline-block; width: 32px; height: 18px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0;
+      background: var(--border);
+      border-radius: 99px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .slider::before {
+      content: '';
+      position: absolute;
+      width: 12px; height: 12px;
+      left: 3px; bottom: 3px;
+      background: var(--muted);
+      border-radius: 50%;
+      transition: transform 0.2s, background 0.2s;
+    }
+    input:checked + .slider { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+    input:checked + .slider::before { transform: translateX(14px); background: var(--accent); }
+
     #statusMsg {
       font-size: 0.7rem;
       color: var(--muted);
@@ -166,6 +197,15 @@
   </div>
 
   <button id="syncBtn">Start Sync</button>
+
+  <div class="auto-row">
+    <label class="switch">
+      <input type="checkbox" id="autoToggle">
+      <span class="slider"></span>
+    </label>
+    <span>Auto-sync elke 15 min</span>
+  </div>
+
   <div id="statusMsg"></div>
 
   <div class="console-wrap">
@@ -176,9 +216,10 @@
   </div>
 
   <script>
-    const btn       = document.getElementById('syncBtn');
-    const log       = document.getElementById('console');
-    const statusMsg = document.getElementById('statusMsg');
+    const btn        = document.getElementById('syncBtn');
+    const log        = document.getElementById('console');
+    const statusMsg  = document.getElementById('statusMsg');
+    const autoToggle = document.getElementById('autoToggle');
 
     function setStatus(text, cls = '') {
       statusMsg.textContent = text;
@@ -265,7 +306,29 @@
       }
     });
 
+    async function refreshCronStatus() {
+      try {
+        const res  = await fetch('/api/cron/status');
+        const data = await res.json();
+        autoToggle.checked = data.active;
+      } catch { /* server not ready */ }
+    }
+
+    autoToggle.addEventListener('change', async () => {
+      autoToggle.disabled = true;
+      try {
+        const res  = await fetch('/api/cron/toggle', { method: 'POST' });
+        const data = await res.json();
+        autoToggle.checked = data.active;
+      } catch {
+        autoToggle.checked = !autoToggle.checked; // revert on error
+      } finally {
+        autoToggle.disabled = false;
+      }
+    });
+
     refreshStatus();
+    refreshCronStatus();
   </script>
 </body>
 </html>

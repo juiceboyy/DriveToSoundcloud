@@ -1,0 +1,10 @@
+services:
+  drive-to-soundcloud:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./.tokens.json:/app/.tokens.json
+      - ./.sync-state.json:/app/.sync-state.json
