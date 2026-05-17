@@ -89,10 +89,13 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
   const playlist = await getRes.json();
   const updatedTracks = [...(playlist.tracks ?? []).map(t => ({ id: t.id })), { id: trackId }];
 
+  const payloadStr = JSON.stringify({ playlist: { tracks: updatedTracks } });
+  console.log(`    [DEBUG] PUT Payload:`, payloadStr);
+
   await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
     method: 'PUT',
     headers: { ...scHeaders(accessToken), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ playlist: { tracks: updatedTracks } }),
+    body: payloadStr,
   });
 }
 
@@ -192,10 +195,16 @@ export async function sync(log = console.log) {
       log(`  ↑ ${trackTitle} …`);
 
       const driveStream = await getDriveStream(drive, file.id);
-      const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-      await addTrackToPlaylist(accessToken, playlistId, track.id);
-      await markSynced(state, file.id, track.id);
 
+      log(`    [DEBUG] Start uploadTrack naar SoundCloud...`);
+      const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
+
+      log(`    [DEBUG] Upload succesvol! Ontvangen Track ID: ${track?.id}`);
+
+      log(`    [DEBUG] Start addTrackToPlaylist (${playlistId})...`);
+      await addTrackToPlaylist(accessToken, playlistId, track.id);
+
+      await markSynced(state, file.id, track.id);
       log(`  ✓ ${trackTitle} (ID: ${track.id})`);
     }
   }
