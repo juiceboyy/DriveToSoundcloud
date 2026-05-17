@@ -3,7 +3,8 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TOKENS_PATH = join(__dirname, '../../.tokens.json');
+const basePath = process.env.DATA_DIR || join(__dirname, '../../');
+const TOKENS_PATH = join(basePath, '.tokens.json');
 
 async function loadTokens() {
   try {
