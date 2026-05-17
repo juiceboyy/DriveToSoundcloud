@@ -72,10 +72,16 @@ async function ensurePlaylist(accessToken, log) {
   const existing = playlists.find(p => p.title === PLAYLIST_NAME);
   if (existing) return existing.id;
 
+  const payloadStr = JSON.stringify({ playlist: { title: PLAYLIST_NAME, sharing: 'private', tracks: [] } });
+
   const createRes = await fetchWithRetry(`${SC_BASE}/playlists`, {
     method: 'POST',
-    headers: { ...scHeaders(accessToken), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ playlist: { title: PLAYLIST_NAME, sharing: 'private', tracks: [] } }),
+    headers: {
+      ...scHeaders(accessToken),
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(payloadStr).toString(),
+    },
+    body: payloadStr,
   });
   const { id } = await createRes.json();
   log(`  Created playlist "${PLAYLIST_NAME}" (ID: ${id})`);
@@ -90,11 +96,14 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
   const updatedTracks = [...(playlist.tracks ?? []).map(t => ({ id: t.id })), { id: trackId }];
 
   const payloadStr = JSON.stringify({ playlist: { tracks: updatedTracks } });
-  console.log(`    [DEBUG] PUT Payload:`, payloadStr);
 
   await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
     method: 'PUT',
-    headers: { ...scHeaders(accessToken), 'Content-Type': 'application/json' },
+    headers: {
+      ...scHeaders(accessToken),
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(payloadStr).toString(),
+    },
     body: payloadStr,
   });
 }
