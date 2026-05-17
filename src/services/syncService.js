@@ -67,6 +67,10 @@ function scHeaders(accessToken) {
   return { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' };
 }
 
+function scUploadHeaders(accessToken) {
+  return { Authorization: `OAuth ${accessToken}` };
+}
+
 async function ensurePlaylist(accessToken, log) {
   const res = await fetchWithRetry(`${SC_BASE}/me/playlists?limit=200`, {
     headers: scHeaders(accessToken),
@@ -147,11 +151,10 @@ async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, f
     {
       method: 'POST',
       headers: {
-        ...scHeaders(accessToken),
+        ...scUploadHeaders(accessToken),
         'Content-Type': multipartType,
-        'Content-Length': String(body.length),
       },
-      body,
+      body: new Uint8Array(body),
     },
     { retries: 0 },
   );
