@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
 import FormData from 'form-data';
-import { Readable } from 'stream';
+import { Readable, PassThrough } from 'stream';
 import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
@@ -113,13 +113,17 @@ async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, f
   form.append('track[sharing]', 'private');
   form.append('track[asset_data]', driveStream, { filename, contentType });
 
-  // Convert Node Readable → Web ReadableStream for native fetch
+  // form-data extends CombinedStream, not stream.Readable, so pipe through
+  // PassThrough which Readable.toWeb() accepts
+  const pass = new PassThrough();
+  form.pipe(pass);
+
   const res = await fetchWithRetry(
     `${SC_BASE}/tracks`,
     {
       method: 'POST',
       headers: { ...scHeaders(accessToken), ...form.getHeaders() },
-      body: Readable.toWeb(form),
+      body: Readable.toWeb(pass),
       duplex: 'half', // required for streaming POST in Node 18+
     },
     { retries: 0 }, // streams are not replayable; surface errors immediately
