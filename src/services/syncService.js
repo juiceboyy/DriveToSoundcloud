@@ -106,26 +106,52 @@ async function streamToBuffer(stream) {
   return Buffer.concat(chunks);
 }
 
+function buildMultipart(fields, file) {
+  const boundary = '----SoundCloudBoundary' + Date.now().toString(16);
+  const e = s => Buffer.from(s);
+  const CRLF = '\r\n';
+
+  const parts = Object.entries(fields).map(([name, value]) =>
+    Buffer.concat([
+      e(`--${boundary}${CRLF}`),
+      e(`Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}`),
+      e(value),
+      e(CRLF),
+    ])
+  );
+
+  parts.push(Buffer.concat([
+    e(`--${boundary}${CRLF}`),
+    e(`Content-Disposition: form-data; name="${file.fieldName}"; filename="${file.filename}"${CRLF}`),
+    e(`Content-Type: ${file.contentType}${CRLF}${CRLF}`),
+    file.buffer,
+    e(CRLF),
+    e(`--${boundary}--${CRLF}`),
+  ]));
+
+  return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
 async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename }) {
   const ext = getExtension(filename);
   const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
-
   const audioBuffer = await streamToBuffer(driveStream);
-  const blob = new Blob([audioBuffer], { type: contentType });
 
-  // Native FormData + native fetch — no boundary/stream wiring needed
-  const form = new FormData();
-  form.append('track[title]', trackTitle);
-  form.append('track[artist]', artistName);
-  form.append('track[sharing]', 'private');
-  form.append('track[asset_data]', blob, filename);
+  const { body, contentType: multipartType } = buildMultipart(
+    { 'track[title]': trackTitle, 'track[artist]': artistName, 'track[sharing]': 'private' },
+    { fieldName: 'track[asset_data]', filename, contentType, buffer: audioBuffer },
+  );
 
   const res = await fetchWithRetry(
     `${SC_BASE}/tracks`,
     {
       method: 'POST',
-      headers: scHeaders(accessToken), // fetch sets multipart Content-Type + boundary automatically
-      body: form,
+      headers: {
+        ...scHeaders(accessToken),
+        'Content-Type': multipartType,
+        'Content-Length': String(body.length),
+      },
+      body,
     },
     { retries: 0 },
   );
