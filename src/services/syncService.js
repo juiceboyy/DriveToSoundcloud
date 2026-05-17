@@ -1,7 +1,5 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
-import FormData from 'form-data';
-import { Readable, PassThrough } from 'stream';
 import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
@@ -102,31 +100,34 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
   });
 }
 
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
 async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename }) {
   const ext = getExtension(filename);
   const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
 
-  // Build multipart body from the drive stream — no buffering, lazily piped
+  const audioBuffer = await streamToBuffer(driveStream);
+  const blob = new Blob([audioBuffer], { type: contentType });
+
+  // Native FormData + native fetch — no boundary/stream wiring needed
   const form = new FormData();
   form.append('track[title]', trackTitle);
   form.append('track[artist]', artistName);
   form.append('track[sharing]', 'private');
-  form.append('track[asset_data]', driveStream, { filename, contentType });
-
-  // form-data extends CombinedStream, not stream.Readable, so pipe through
-  // PassThrough which Readable.toWeb() accepts
-  const pass = new PassThrough();
-  form.pipe(pass);
+  form.append('track[asset_data]', blob, filename);
 
   const res = await fetchWithRetry(
     `${SC_BASE}/tracks`,
     {
       method: 'POST',
-      headers: { ...scHeaders(accessToken), ...form.getHeaders() },
-      body: Readable.toWeb(pass),
-      duplex: 'half', // required for streaming POST in Node 18+
+      headers: scHeaders(accessToken), // fetch sets multipart Content-Type + boundary automatically
+      body: form,
     },
-    { retries: 0 }, // streams are not replayable; surface errors immediately
+    { retries: 0 },
   );
   return res.json();
 }
