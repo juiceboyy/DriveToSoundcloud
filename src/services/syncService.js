@@ -120,7 +120,12 @@ async function uploadTrack(accessToken, { trackTitle, driveStream, filename, fil
   const CRLF = '\r\n';
   const safeFilename = 'upload' + ext;
 
-  const fields = { 'track[title]': trackTitle.trim(), 'track[sharing]': 'private' };
+  const fields = {
+    'track[title]': trackTitle.trim(),
+    'track[sharing]': 'private',
+    'track[publisher_metadata][artist]': artistName,
+    'track[publisher_metadata][contains_music]': 'true',
+  };
   let header = '';
   for (const [name, value] of Object.entries(fields)) {
     header += `--${boundary}${CRLF}`;
