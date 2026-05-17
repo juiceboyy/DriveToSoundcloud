@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
-import https from 'https';
 import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
@@ -8,15 +7,10 @@ import { fetchWithRetry } from '../utils/fetchWithRetry.js';
 import { loadState, isSynced, markSynced } from '../utils/syncState.js';
 
 const PRODUCING_FOLDER = 'producing';
+const MIME_TYPES = { '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.aiff': 'audio/aiff' };
 const PLAYLIST_NAME = 'CarPlay Mixes';
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.aiff']);
 const SC_BASE = 'https://api.soundcloud.com';
-
-const MIME_TYPES = {
-  '.wav': 'audio/wav',
-  '.mp3': 'audio/mpeg',
-  '.aiff': 'audio/aiff',
-};
 
 // ── Google Drive helpers ──────────────────────────────────────────────────────
 
@@ -101,86 +95,60 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
   });
 }
 
-async function streamToBuffer(stream) {
-  const chunks = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  return Buffer.concat(chunks);
-}
-
-function buildMultipart(fields, file) {
-  const boundary = '----SoundCloudBoundary' + Date.now().toString(16);
-  const e = s => Buffer.from(s);
-  const CRLF = '\r\n';
-
-  const parts = Object.entries(fields).map(([name, value]) =>
-    Buffer.concat([
-      e(`--${boundary}${CRLF}`),
-      e(`Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}`),
-      e(value),
-      e(CRLF),
-    ])
-  );
-
-  parts.push(Buffer.concat([
-    e(`--${boundary}${CRLF}`),
-    e(`Content-Disposition: form-data; name="${file.fieldName}"; filename="${file.filename}"${CRLF}`),
-    e(`Content-Type: ${file.contentType}${CRLF}${CRLF}`),
-    file.buffer,
-    e(CRLF),
-    e(`--${boundary}--${CRLF}`),
-  ]));
-
-  return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
-}
-
-async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename }) {
+async function uploadTrack(accessToken, { trackTitle, driveStream, filename }) {
   const ext = getExtension(filename);
   const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
-  const audioBuffer = await streamToBuffer(driveStream);
+  const boundary = '----SoundCloudBoundary' + Date.now().toString(16);
+  const CRLF = '\r\n';
+  const safeFilename = filename.replace(/"/g, '');
 
-  const { body, contentType: multipartType } = buildMultipart(
-    { 'track[title]': trackTitle, 'track[sharing]': 'private' },
-    { fieldName: 'track[asset_data]', filename, contentType, buffer: audioBuffer },
-  );
-
-  const result = await httpsPost(`${SC_BASE}/tracks`, {
-    Authorization: `OAuth ${accessToken}`,
-    'Content-Type': multipartType,
-    'Content-Length': body.length,
-  }, body);
-
-  if (result.status < 200 || result.status >= 300) {
-    throw new Error(`HTTP ${result.status}: ${result.statusText} — ${result.body}`);
+  const fields = { 'track[title]': trackTitle, 'track[sharing]': 'private' };
+  let header = '';
+  for (const [name, value] of Object.entries(fields)) {
+    header += `--${boundary}${CRLF}`;
+    header += `Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}`;
+    header += `${value}${CRLF}`;
   }
-  return JSON.parse(result.body);
-}
+  header += `--${boundary}${CRLF}`;
+  header += `Content-Disposition: form-data; name="track[asset_data]"; filename="${safeFilename}"${CRLF}`;
+  header += `Content-Type: ${contentType}${CRLF}${CRLF}`;
+  const footer = `${CRLF}--${boundary}--${CRLF}`;
 
-function httpsRequest(method, url, headers, body) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const req = https.request({
-      hostname: u.hostname,
-      port: 443,
-      path: u.pathname + u.search,
-      method,
-      headers,
-    }, (res) => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({
-        status: res.statusCode,
-        statusText: res.statusMessage,
-        body: Buffer.concat(chunks).toString('utf8'),
-      }));
-    });
-    req.on('error', reject);
-    if (body) req.write(body);
-    req.end();
+  const bodyStream = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(new TextEncoder().encode(header));
+      try {
+        for await (const chunk of driveStream) controller.enqueue(chunk);
+        controller.enqueue(new TextEncoder().encode(footer));
+      } catch (err) {
+        controller.error(err);
+      } finally {
+        controller.close();
+      }
+    },
   });
-}
 
-const httpsPost = (url, headers, body) => httpsRequest('POST', url, headers, body);
-const httpsPut  = (url, headers, body) => httpsRequest('PUT',  url, headers, body);
+  const response = await fetchWithRetry(`${SC_BASE}/tracks`, {
+    method: 'POST',
+    headers: {
+      Authorization: `OAuth ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    },
+    body: bodyStream,
+    duplex: 'half',
+  }, { retries: 0 });
+
+  const resultBody = await response.text();
+  let track;
+  try {
+    track = JSON.parse(resultBody);
+  } catch {
+    throw new Error(`Upload failed — SoundCloud returned non-JSON: ${resultBody.slice(0, 500)}`);
+  }
+  if (!track.id) throw new Error(`Upload failed: ${JSON.stringify(track)}`);
+  return track;
+}
 
 // ── Main pipeline ─────────────────────────────────────────────────────────────
 
