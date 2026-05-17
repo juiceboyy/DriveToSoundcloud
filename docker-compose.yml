@@ -4,7 +4,11 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    environment:
+      - DATA_DIR=/data
     volumes:
       - ./.env:/app/.env:ro
-      - ./.tokens.json:/app/.tokens.json
-      - ./.sync-state.json:/app/.sync-state.json
+      - railway_data:/data
+
+volumes:
+  railway_data:
