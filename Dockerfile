@@ -13,8 +13,6 @@ COPY entrypoint.sh ./entrypoint.sh
 
 RUN chmod +x entrypoint.sh
 
-USER node
-
 EXPOSE 3000
 
 ENTRYPOINT ["./entrypoint.sh"]
