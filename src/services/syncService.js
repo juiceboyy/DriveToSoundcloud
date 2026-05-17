@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
+import { Blob } from 'node:buffer';
 import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
@@ -98,45 +99,24 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
 async function uploadTrack(accessToken, { trackTitle, driveStream, filename }) {
   const ext = getExtension(filename);
   const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
-  const boundary = '----SoundCloudBoundary' + Date.now().toString(16);
-  const CRLF = '\r\n';
+
+  const chunks = [];
+  for await (const chunk of driveStream) chunks.push(chunk);
+  const blob = new Blob([Buffer.concat(chunks)], { type: contentType });
+
   const safeFilename = filename.replace(/"/g, '');
-
-  const fields = { 'track[title]': trackTitle, 'track[sharing]': 'private' };
-  let header = '';
-  for (const [name, value] of Object.entries(fields)) {
-    header += `--${boundary}${CRLF}`;
-    header += `Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}`;
-    header += `${value}${CRLF}`;
-  }
-  header += `--${boundary}${CRLF}`;
-  header += `Content-Disposition: form-data; name="track[asset_data]"; filename="${safeFilename}"${CRLF}`;
-  header += `Content-Type: ${contentType}${CRLF}${CRLF}`;
-  const footer = `${CRLF}--${boundary}--${CRLF}`;
-
-  const bodyStream = new ReadableStream({
-    async start(controller) {
-      controller.enqueue(new TextEncoder().encode(header));
-      try {
-        for await (const chunk of driveStream) controller.enqueue(chunk);
-        controller.enqueue(new TextEncoder().encode(footer));
-      } catch (err) {
-        controller.error(err);
-      } finally {
-        controller.close();
-      }
-    },
-  });
+  const formData = new FormData();
+  formData.append('track[title]', trackTitle);
+  formData.append('track[sharing]', 'private');
+  formData.append('track[asset_data]', blob, safeFilename);
 
   const response = await fetchWithRetry(`${SC_BASE}/tracks`, {
     method: 'POST',
     headers: {
       Authorization: `OAuth ${accessToken}`,
       Accept: 'application/json',
-      'Content-Type': `multipart/form-data; boundary=${boundary}`,
     },
-    body: bodyStream,
-    duplex: 'half',
+    body: formData,
   }, { retries: 0 });
 
   const resultBody = await response.text();
