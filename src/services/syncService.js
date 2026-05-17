@@ -109,7 +109,7 @@ async function addTrackToPlaylist(accessToken, playlistId, trackId) {
   }
 }
 
-async function uploadTrack(accessToken, { trackTitle, driveStream, filename, fileSize }) {
+async function uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename, fileSize }) {
   if (!fileSize || isNaN(fileSize)) {
     throw new Error(`Kan track niet uploaden: ongeldige bestandsgrootte (${fileSize}) voor ${filename}`);
   }
@@ -123,8 +123,6 @@ async function uploadTrack(accessToken, { trackTitle, driveStream, filename, fil
   const fields = {
     'track[title]': trackTitle.trim(),
     'track[sharing]': 'private',
-    'track[publisher_metadata][artist]': artistName,
-    'track[publisher_metadata][contains_music]': 'true',
   };
   let header = '';
   for (const [name, value] of Object.entries(fields)) {
@@ -172,6 +170,23 @@ async function uploadTrack(accessToken, { trackTitle, driveStream, filename, fil
   });
 }
 
+async function updateTrackMetadata(accessToken, trackId, artistName) {
+  const params = new URLSearchParams();
+  params.append('track[publisher_metadata][artist]', artistName);
+  params.append('track[publisher_metadata][contains_music]', 'true');
+
+  const res = await fetchWithRetry(`${SC_BASE}/tracks/${trackId}`, {
+    method: 'PUT',
+    headers: scHeaders(accessToken),
+    body: params,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    console.warn(`  [WAARSCHUWING] Kon Main Artist niet updaten voor track ${trackId}: ${res.status} - ${errText}`);
+  }
+}
+
 // ── Main pipeline ─────────────────────────────────────────────────────────────
 
 export async function sync(log = console.log) {
@@ -212,6 +227,7 @@ export async function sync(log = console.log) {
 
       const driveStream = await getDriveStream(drive, file.id);
       const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
+      await updateTrackMetadata(accessToken, track.id, artistName);
       await addTrackToPlaylist(accessToken, playlistId, track.id);
 
       await markSynced(state, file.id, track.id);
