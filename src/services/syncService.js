@@ -145,13 +145,21 @@ async function sendNotification(message) {
 }
 
 async function deleteTrack(accessToken, trackId) {
-  const res = await fetchWithRetry(`${SC_BASE}/tracks/${trackId}`, {
-    method: 'DELETE',
-    headers: scHeaders(accessToken),
-  });
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Delete track failed: ${res.status} - ${errText}`);
+  if (!trackId) return;
+  const idStr = typeof trackId === 'object' ? trackId.scTrackId : trackId;
+
+  try {
+    await fetchWithRetry(`${SC_BASE}/tracks/${idStr}`, {
+      method: 'DELETE',
+      headers: scHeaders(accessToken),
+    });
+    console.log(`  [CLEANUP] Oude track (ID: ${idStr}) verwijderd van SoundCloud.`);
+  } catch (err) {
+    if (err.message.includes('HTTP 404')) {
+      console.warn(`  [WAARSCHUWING] Track ID ${idStr} niet gevonden op SoundCloud (mogelijk al handmatig verwijderd).`);
+    } else {
+      throw err;
+    }
   }
 }
 
