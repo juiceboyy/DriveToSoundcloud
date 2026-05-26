@@ -1,5 +1,5 @@
 import { google } from 'googleapis';
-import { getToken, setToken } from '../utils/tokenStore.js';
+import { getToken, setToken, deleteToken } from '../utils/tokenStore.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/drive.readonly'];
 
@@ -39,6 +39,17 @@ export async function getAuthenticatedClient() {
     const current = await getToken('google');
     await setToken('google', { ...current, ...refreshed });
   });
+
+  // Proactively check/refresh the access token to catch invalid_grant (expired/revoked refresh token)
+  try {
+    await client.getAccessToken();
+  } catch (err) {
+    if (err.message.includes('invalid_grant') || err.message.includes('invalid_client') || err.message.includes('revoked')) {
+      await deleteToken('google');
+      throw new Error('Google Drive credentials expired/revoked. Please visit /auth/google to re-authenticate.');
+    }
+    throw err;
+  }
 
   return client;
 }

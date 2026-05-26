@@ -29,3 +29,11 @@ export async function setToken(service, tokenData) {
   tokens[service] = tokenData;
   await saveTokens(tokens);
 }
+
+export async function deleteToken(service) {
+  const tokens = await loadTokens();
+  if (tokens[service]) {
+    delete tokens[service];
+    await saveTokens(tokens);
+  }
+}

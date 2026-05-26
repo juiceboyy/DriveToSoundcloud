@@ -1,4 +1,4 @@
-import { getToken, setToken } from '../utils/tokenStore.js';
+import { getToken, setToken, deleteToken } from '../utils/tokenStore.js';
 import { fetchWithRetry } from '../utils/fetchWithRetry.js';
 
 const AUTH_URL = 'https://soundcloud.com/connect';
@@ -63,8 +63,16 @@ export async function getAccessToken() {
   if (tokens.expires_in) {
     const expiresAt = tokens.obtained_at + tokens.expires_in * 1000;
     if (Date.now() > expiresAt - 60_000) {
-      const refreshed = await refreshAccessToken();
-      return refreshed.access_token;
+      try {
+        const refreshed = await refreshAccessToken();
+        return refreshed.access_token;
+      } catch (err) {
+        if (err.message.includes('invalid_grant') || err.message.includes('400') || err.message.includes('401')) {
+          await deleteToken('soundcloud');
+          throw new Error('SoundCloud credentials expired/revoked. Please visit /auth/soundcloud to re-authenticate.');
+        }
+        throw err;
+      }
     }
   }
 
