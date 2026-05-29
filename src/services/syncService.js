@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
 import { fetchWithRetry } from '../utils/fetchWithRetry.js';
-import { loadState, isSynced, markSynced, getStoredTrackId, getStoredModifiedTime } from '../utils/syncState.js';
+import { loadState, isSynced, markSynced, getStoredTrackId, getStoredModifiedTime, removeStateEntry } from '../utils/syncState.js';
 
 const PRODUCING_FOLDER = 'producing';
 const MIME_TYPES = { '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.aiff': 'audio/aiff' };
@@ -101,13 +101,49 @@ async function ensurePlaylist(accessToken, log) {
   return data.id;
 }
 
-async function addTrackToPlaylist(accessToken, playlistId, trackId) {
+async function addTrackToPlaylist(accessToken, playlistId, trackId, excludeTrackId = null) {
   const getRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
     headers: scHeaders(accessToken),
   });
   const playlist = await getRes.json();
 
-  const trackIds = [...(playlist.tracks ?? []).map(t => t.id), trackId];
+  const excludeStr = excludeTrackId ? String(typeof excludeTrackId === 'object' ? excludeTrackId.scTrackId : excludeTrackId) : null;
+  
+  let trackIds = (playlist.tracks ?? [])
+    .map(t => t.id)
+    .filter(id => id && String(id) !== excludeStr);
+
+  trackIds.push(trackId);
+
+  // Deduplicate
+  trackIds = [...new Set(trackIds)];
+
+  const params = new URLSearchParams();
+  trackIds.forEach(id => params.append('playlist[tracks][][id]', id));
+
+  const putRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
+    method: 'PUT',
+    headers: { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' },
+    body: params,
+  });
+
+  if (!putRes.ok) {
+    const errText = await putRes.text();
+    throw new Error(`Playlist update failed: ${putRes.status} - ${errText}`);
+  }
+}
+
+async function removeTrackFromPlaylist(accessToken, playlistId, trackId) {
+  const getRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
+    headers: scHeaders(accessToken),
+  });
+  const playlist = await getRes.json();
+
+  const idStr = String(typeof trackId === 'object' ? trackId.scTrackId : trackId);
+  const trackIds = (playlist.tracks ?? [])
+    .map(t => t.id)
+    .filter(id => id && String(id) !== idStr);
+
   const params = new URLSearchParams();
   trackIds.forEach(id => params.append('playlist[tracks][][id]', id));
 
@@ -242,6 +278,7 @@ export async function sync(log = console.log) {
 
   const subfolders = await listSubfolders(drive, producingFolder.id);
   const state = await loadState();
+  const activeDriveIds = new Set();
 
   for (const subfolder of subfolders) {
     const artistName = subfolder.name;
@@ -261,20 +298,24 @@ export async function sync(log = console.log) {
     log(`[${sourceLabel}] — ${audioFiles.length} track(s)`);
 
     for (const file of audioFiles) {
+      activeDriveIds.add(file.id);
       const ext = getExtension(file.name);
       const rawTitle = file.name.slice(0, file.name.length - ext.length);
       const trackTitle = `${artistName} - ${rawTitle}`;
 
       if (isSynced(state, file.id)) {
         const storedModified = getStoredModifiedTime(state, file.id);
-        if (storedModified && file.modifiedTime > storedModified) {
+        const storedTime = storedModified ? new Date(storedModified).getTime() : 0;
+        const fileTime = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
+
+        if (storedTime && fileTime > storedTime) {
           const oldTrackId = getStoredTrackId(state, file.id);
           log(`  [UPDATE] Nieuwe versie gedetecteerd voor ${trackTitle}, oude track wordt verwijderd...`);
           await deleteTrack(accessToken, oldTrackId);
 
           const driveStream = await getDriveStream(drive, file.id);
           const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-          await addTrackToPlaylist(accessToken, playlistId, track.id);
+          await addTrackToPlaylist(accessToken, playlistId, track.id, oldTrackId);
           await markSynced(state, file.id, track.id, file.modifiedTime);
           await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
           log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
@@ -293,6 +334,40 @@ export async function sync(log = console.log) {
       await sendNotification(`✅ Nieuwe mix:\n${trackTitle}`);
       log(`  ✓ ${trackTitle} (ID: ${track.id})`);
     }
+  }
+
+  // ── Opruimfase voor verwijderde/vervangen bestanden ───────────────────────
+  log('\nStarten met opruimen van wees-tracks...');
+  const stateKeys = Object.keys(state);
+  let cleanupCount = 0;
+
+  for (const driveFileId of stateKeys) {
+    if (!activeDriveIds.has(driveFileId)) {
+      const oldTrackId = getStoredTrackId(state, driveFileId);
+      if (oldTrackId) {
+        log(`  [CLEANUP] Google Drive bestand (ID: ${driveFileId}) is niet meer aanwezig. SoundCloud track (ID: ${oldTrackId}) wordt verwijderd.`);
+        
+        try {
+          await removeTrackFromPlaylist(accessToken, playlistId, oldTrackId);
+        } catch (err) {
+          log(`  [WAARSCHUWING] Kon track ID ${oldTrackId} niet uit de afspeellijst verwijderen: ${err.message}`);
+        }
+
+        try {
+          await deleteTrack(accessToken, oldTrackId);
+        } catch (err) {
+          log(`  [WAARSCHUWING] Kon track ID ${oldTrackId} niet verwijderen van SoundCloud: ${err.message}`);
+        }
+      }
+      await removeStateEntry(state, driveFileId);
+      cleanupCount++;
+    }
+  }
+
+  if (cleanupCount > 0) {
+    log(`  ✓ Opruimen voltooid: ${cleanupCount} wees-track(s) verwijderd.`);
+  } else {
+    log('  Geen wees-tracks gevonden.');
   }
 
   log('\nSync complete.');

@@ -39,3 +39,10 @@ export async function markSynced(state, driveFileId, scTrackId, modifiedTime) {
   state[driveFileId] = { scTrackId, modifiedTime };
   await writeFile(STATE_PATH, JSON.stringify(state, null, 2), 'utf-8');
 }
+
+// Mutates state in-place by removing the entry and immediately flushes to disk
+export async function removeStateEntry(state, driveFileId) {
+  delete state[driveFileId];
+  await writeFile(STATE_PATH, JSON.stringify(state, null, 2), 'utf-8');
+}
+
