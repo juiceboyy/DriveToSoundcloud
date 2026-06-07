@@ -5,13 +5,36 @@ import { fileURLToPath } from 'url';
 import { getAuthenticatedClient } from '../auth/google.js';
 import { getAccessToken } from '../auth/soundcloud.js';
 import { fetchWithRetry } from '../utils/fetchWithRetry.js';
-import { loadState, isSynced, markSynced, getStoredTrackId, getStoredModifiedTime, removeStateEntry } from '../utils/syncState.js';
+import { loadState, isSynced, markSynced, getStoredTrackId, getStoredModifiedTime, getStoredVersion, removeStateEntry } from '../utils/syncState.js';
 
 const PRODUCING_FOLDER = 'producing';
 const MIME_TYPES = { '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.aiff': 'audio/aiff' };
 const PLAYLIST_NAME = 'CarPlay Mixes';
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.aiff']);
 const SC_BASE = 'https://api.soundcloud.com';
+
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findBestTrackMatch(playlistTracks, baseTitle) {
+  let bestMatch = null;
+  const regex = new RegExp('^' + escapeRegExp(baseTitle) + '(?: \\(v(\\d+)\\))?$', 'i');
+  for (const track of playlistTracks) {
+    if (!track.title) continue;
+    const match = track.title.match(regex);
+    if (match) {
+      const version = match[1] !== undefined ? parseInt(match[1], 10) : 1;
+      if (!bestMatch || version > bestMatch.version) {
+        bestMatch = {
+          id: track.id,
+          version,
+        };
+      }
+    }
+  }
+  return bestMatch;
+}
 
 // ── Google Drive helpers ──────────────────────────────────────────────────────
 
@@ -52,7 +75,7 @@ async function findBouncesFolder(drive, parentId) {
 async function listAudioFiles(drive, folderId) {
   const { data } = await drive.files.list({
     q: `'${folderId}' in parents and trashed=false`,
-    fields: 'files(id, name, size, createdTime, modifiedTime)',
+    fields: 'files(id, name, size, createdTime, modifiedTime, version)',
     orderBy: 'name',
   });
   return data.files.filter(f => {
@@ -276,6 +299,12 @@ export async function sync(log = console.log) {
   const playlistId = await ensurePlaylist(accessToken, log);
   log(`Playlist "${PLAYLIST_NAME}" ready (ID: ${playlistId})\n`);
 
+  const getRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
+    headers: scHeaders(accessToken),
+  });
+  const playlist = await getRes.json();
+  const playlistTracks = playlist.tracks ?? [];
+
   const subfolders = await listSubfolders(drive, producingFolder.id);
   const state = await loadState();
   const activeDriveIds = new Set();
@@ -301,22 +330,34 @@ export async function sync(log = console.log) {
       activeDriveIds.add(file.id);
       const ext = getExtension(file.name);
       const rawTitle = file.name.slice(0, file.name.length - ext.length);
-      const trackTitle = `${artistName} - ${rawTitle}`;
+      const baseTitle = `${artistName} - ${rawTitle}`;
+
+      const driveVersion = file.version ? parseInt(file.version, 10) : 1;
+      const trackTitle = `${baseTitle} (v${driveVersion})`;
 
       if (isSynced(state, file.id)) {
+        const storedVersion = getStoredVersion(state, file.id);
         const storedModified = getStoredModifiedTime(state, file.id);
         const storedTime = storedModified ? new Date(storedModified).getTime() : 0;
         const fileTime = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
 
-        if (storedTime && fileTime > storedTime) {
+        let needsUpdate = false;
+        if (storedVersion === null) {
+          needsUpdate = (storedTime && fileTime > storedTime) || !storedTime;
+        } else {
+          needsUpdate = driveVersion !== storedVersion;
+        }
+
+        if (needsUpdate) {
           const oldTrackId = getStoredTrackId(state, file.id);
-          log(`  [UPDATE] Nieuwe versie gedetecteerd voor ${trackTitle}, oude track wordt verwijderd...`);
+          const oldVersionStr = storedVersion !== null ? `v${storedVersion}` : 'legacy';
+          log(`  [UPDATE] Nieuwe versie gedetecteerd voor ${baseTitle} (${oldVersionStr} → v${driveVersion}), oude track wordt verwijderd...`);
           await deleteTrack(accessToken, oldTrackId);
 
           const driveStream = await getDriveStream(drive, file.id);
           const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
           await addTrackToPlaylist(accessToken, playlistId, track.id, oldTrackId);
-          await markSynced(state, file.id, track.id, file.modifiedTime);
+          await markSynced(state, file.id, track.id, file.modifiedTime, driveVersion);
           await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
           log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
         } else {
@@ -325,12 +366,36 @@ export async function sync(log = console.log) {
         continue;
       }
 
+      // Herstel / Duplicaatdetectie op basis van SoundCloud playlist tracks
+      const bestMatch = findBestTrackMatch(playlistTracks, baseTitle);
+
+      if (bestMatch) {
+        log(`  [RECOVERY] SoundCloud track gevonden voor ${baseTitle} met versie v${bestMatch.version}`);
+
+        if (bestMatch.version === driveVersion) {
+          log(`  [RECOVERY] Lokale status hersteld voor ${trackTitle}. Geen upload nodig.`);
+          await markSynced(state, file.id, bestMatch.id, file.modifiedTime, driveVersion);
+          continue;
+        } else {
+          log(`  [RECOVERY-UPDATE] Versieverschil gedetecteerd voor ${baseTitle} (SoundCloud v${bestMatch.version} → Drive v${driveVersion}), oude track wordt verwijderd...`);
+          await deleteTrack(accessToken, bestMatch.id);
+
+          const driveStream = await getDriveStream(drive, file.id);
+          const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
+          await addTrackToPlaylist(accessToken, playlistId, track.id, bestMatch.id);
+          await markSynced(state, file.id, track.id, file.modifiedTime, driveVersion);
+          await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
+          log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
+          continue;
+        }
+      }
+
       log(`  ↑ ${trackTitle} …`);
 
       const driveStream = await getDriveStream(drive, file.id);
       const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
       await addTrackToPlaylist(accessToken, playlistId, track.id);
-      await markSynced(state, file.id, track.id, file.modifiedTime);
+      await markSynced(state, file.id, track.id, file.modifiedTime, driveVersion);
       await sendNotification(`✅ Nieuwe mix:\n${trackTitle}`);
       log(`  ✓ ${trackTitle} (ID: ${track.id})`);
     }

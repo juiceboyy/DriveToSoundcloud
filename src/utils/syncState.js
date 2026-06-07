@@ -34,9 +34,15 @@ export function getStoredModifiedTime(state, driveFileId) {
   return entry.modifiedTime ?? null;
 }
 
+export function getStoredVersion(state, driveFileId) {
+  const entry = state[driveFileId];
+  if (!entry || typeof entry === 'string') return null;
+  return entry.version ?? null;
+}
+
 // Mutates state in-place and immediately flushes to disk
-export async function markSynced(state, driveFileId, scTrackId, modifiedTime) {
-  state[driveFileId] = { scTrackId, modifiedTime };
+export async function markSynced(state, driveFileId, scTrackId, modifiedTime, version) {
+  state[driveFileId] = { scTrackId, modifiedTime, version };
   await writeFile(STATE_PATH, JSON.stringify(state, null, 2), 'utf-8');
 }
 
