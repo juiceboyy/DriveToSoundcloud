@@ -36,6 +36,19 @@ function findBestTrackMatch(playlistTracks, baseTitle) {
   return bestMatch;
 }
 
+function findMatchingTrackIds(playlistTracks, baseTitle) {
+  const matches = [];
+  const regex = new RegExp('^' + escapeRegExp(baseTitle) + '(?: \\(v(\\d+)\\))?$', 'i');
+  for (const track of playlistTracks) {
+    if (!track.title) continue;
+    const match = track.title.match(regex);
+    if (match) {
+      matches.push(track.id);
+    }
+  }
+  return matches;
+}
+
 // ── Google Drive helpers ──────────────────────────────────────────────────────
 
 function getExtension(filename) {
@@ -124,17 +137,26 @@ async function ensurePlaylist(accessToken, log) {
   return data.id;
 }
 
-async function addTrackToPlaylist(accessToken, playlistId, trackId, excludeTrackId = null) {
+async function addTrackToPlaylist(accessToken, playlistId, trackId, excludeTrackIds = null) {
   const getRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
     headers: scHeaders(accessToken),
   });
   const playlist = await getRes.json();
 
-  const excludeStr = excludeTrackId ? String(typeof excludeTrackId === 'object' ? excludeTrackId.scTrackId : excludeTrackId) : null;
+  const excludes = new Set();
+  if (excludeTrackIds) {
+    if (Array.isArray(excludeTrackIds)) {
+      excludeTrackIds.forEach(id => excludes.add(String(id)));
+    } else if (typeof excludeTrackIds === 'object' && excludeTrackIds.scTrackId) {
+      excludes.add(String(excludeTrackIds.scTrackId));
+    } else {
+      excludes.add(String(excludeTrackIds));
+    }
+  }
   
   let trackIds = (playlist.tracks ?? [])
     .map(t => t.id)
-    .filter(id => id && String(id) !== excludeStr);
+    .filter(id => id && !excludes.has(String(id)));
 
   trackIds.push(trackId);
 
@@ -332,8 +354,19 @@ export async function sync(log = console.log) {
       const rawTitle = file.name.slice(0, file.name.length - ext.length);
       const baseTitle = `${artistName} - ${rawTitle}`;
 
-      const driveVersion = file.version ? parseInt(file.version, 10) : 1;
+      // Versienummer bepalen op basis van het aantal Google Drive revisies
+      let driveVersion = 1;
+      try {
+        const revisionsRes = await drive.revisions.list({ fileId: file.id, fields: 'revisions(id)' });
+        driveVersion = (revisionsRes.data.revisions && revisionsRes.data.revisions.length > 0)
+          ? revisionsRes.data.revisions.length
+          : 1;
+      } catch (err) {
+        log(`  [WAARSCHUWING] Kon revisies niet ophalen voor ${file.name}, standaardversie v1 wordt gebruikt: ${err.message}`);
+      }
+
       const trackTitle = `${baseTitle} (v${driveVersion})`;
+      const matchingIds = findMatchingTrackIds(playlistTracks, baseTitle);
 
       if (isSynced(state, file.id)) {
         const storedVersion = getStoredVersion(state, file.id);
@@ -349,14 +382,15 @@ export async function sync(log = console.log) {
         }
 
         if (needsUpdate) {
-          const oldTrackId = getStoredTrackId(state, file.id);
           const oldVersionStr = storedVersion !== null ? `v${storedVersion}` : 'legacy';
-          log(`  [UPDATE] Nieuwe versie gedetecteerd voor ${baseTitle} (${oldVersionStr} → v${driveVersion}), oude track wordt verwijderd...`);
-          await deleteTrack(accessToken, oldTrackId);
+          log(`  [UPDATE] Nieuwe versie gedetecteerd voor ${baseTitle} (${oldVersionStr} → v${driveVersion}), oude track(s) worden verwijderd...`);
+          for (const matchId of matchingIds) {
+            await deleteTrack(accessToken, matchId);
+          }
 
           const driveStream = await getDriveStream(drive, file.id);
           const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-          await addTrackToPlaylist(accessToken, playlistId, track.id, oldTrackId);
+          await addTrackToPlaylist(accessToken, playlistId, track.id, matchingIds);
           await markSynced(state, file.id, track.id, file.modifiedTime, driveVersion);
           await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
           log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
@@ -377,12 +411,14 @@ export async function sync(log = console.log) {
           await markSynced(state, file.id, bestMatch.id, file.modifiedTime, driveVersion);
           continue;
         } else {
-          log(`  [RECOVERY-UPDATE] Versieverschil gedetecteerd voor ${baseTitle} (SoundCloud v${bestMatch.version} → Drive v${driveVersion}), oude track wordt verwijderd...`);
-          await deleteTrack(accessToken, bestMatch.id);
+          log(`  [RECOVERY-UPDATE] Versieverschil gedetecteerd voor ${baseTitle} (SoundCloud v${bestMatch.version} → Drive v${driveVersion}), oude track(s) worden verwijderd...`);
+          for (const matchId of matchingIds) {
+            await deleteTrack(accessToken, matchId);
+          }
 
           const driveStream = await getDriveStream(drive, file.id);
           const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-          await addTrackToPlaylist(accessToken, playlistId, track.id, bestMatch.id);
+          await addTrackToPlaylist(accessToken, playlistId, track.id, matchingIds);
           await markSynced(state, file.id, track.id, file.modifiedTime, driveVersion);
           await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
           log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
@@ -390,11 +426,19 @@ export async function sync(log = console.log) {
         }
       }
 
+      // Echt nieuw bestand (of stray opruimen indien aanwezig)
+      if (matchingIds.length > 0) {
+        log(`  [CLEANUP] Oude losse track(s) gedetecteerd voor ${baseTitle}, deze worden verwijderd...`);
+        for (const matchId of matchingIds) {
+          await deleteTrack(accessToken, matchId);
+        }
+      }
+
       log(`  ↑ ${trackTitle} …`);
 
       const driveStream = await getDriveStream(drive, file.id);
       const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-      await addTrackToPlaylist(accessToken, playlistId, track.id);
+      await addTrackToPlaylist(accessToken, playlistId, track.id, matchingIds);
       await markSynced(state, file.id, track.id, file.modifiedTime, driveVersion);
       await sendNotification(`✅ Nieuwe mix:\n${trackTitle}`);
       log(`  ✓ ${trackTitle} (ID: ${track.id})`);
