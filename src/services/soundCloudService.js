@@ -11,7 +11,7 @@ function escapeRegExp(string) {
 
 export function findBestTrackMatch(playlistTracks, baseTitle) {
   let bestMatch = null;
-  const regex = new RegExp('^' + escapeRegExp(baseTitle) + '(?: \\(v(\\d+)\\))?$', 'i');
+  const regex = new RegExp('^' + escapeRegExp(baseTitle) + '(?:[\\s_\\-\\.\\(\\[]+(?:versie|v)[\\s\\.]*(\\d+)[\\)\\]]?)?$', 'i');
   for (const track of playlistTracks) {
     if (!track.title) continue;
     const match = track.title.match(regex);
@@ -30,7 +30,7 @@ export function findBestTrackMatch(playlistTracks, baseTitle) {
 
 export function findMatchingTrackIds(playlistTracks, baseTitle) {
   const matches = [];
-  const regex = new RegExp('^' + escapeRegExp(baseTitle) + '(?: \\(v(\\d+)\\))?$', 'i');
+  const regex = new RegExp('^' + escapeRegExp(baseTitle) + '(?:[\\s_\\-\\.\\(\\[]+(?:versie|v)[\\s\\.]*(\\d+)[\\)\\]]?)?$', 'i');
   for (const track of playlistTracks) {
     if (!track.title) continue;
     const match = track.title.match(regex);

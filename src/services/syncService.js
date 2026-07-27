@@ -35,6 +35,8 @@ import {
   sendNotification,
 } from './soundCloudService.js';
 
+import { parseVersionAndCleanTitle, deduplicateDriveFiles } from '../utils/versionUtils.js';
+
 const PRODUCING_FOLDER = 'producing';
 
 export async function sync(log = console.log) {
@@ -78,24 +80,36 @@ export async function sync(log = console.log) {
     if (audioFiles.length === 0) continue;
     log(`[${sourceLabel}] — ${audioFiles.length} track(s)`);
 
+    const fileInfos = [];
     for (const file of audioFiles) {
-      activeDriveIds.add(file.id);
       const ext = getExtension(file.name);
       const rawTitle = file.name.slice(0, file.name.length - ext.length);
-      const baseTitle = `${artistName} - ${rawTitle}`;
+      const { cleanTitle, explicitVersion } = parseVersionAndCleanTitle(rawTitle);
+      const baseTitle = `${artistName} - ${cleanTitle}`;
 
-      // Versienummer bepalen op basis van het aantal Google Drive revisies
-      let driveVersion = 1;
-      try {
-        const revisionsRes = await drive.revisions.list({ fileId: file.id, fields: 'revisions(id)' });
-        driveVersion = (revisionsRes.data.revisions && revisionsRes.data.revisions.length > 0)
-          ? revisionsRes.data.revisions.length
-          : 1;
-      } catch (err) {
-        log(`  [WAARSCHUWING] Kon revisies niet ophalen voor ${file.name}, standaardversie v1 wordt gebruikt: ${err.message}`);
+      let version = 1;
+      if (explicitVersion !== null) {
+        version = explicitVersion;
+      } else {
+        try {
+          const revisionsRes = await drive.revisions.list({ fileId: file.id, fields: 'revisions(id)' });
+          version = (revisionsRes.data.revisions && revisionsRes.data.revisions.length > 0)
+            ? revisionsRes.data.revisions.length
+            : 1;
+        } catch (err) {
+          log(`  [WAARSCHUWING] Kon revisies niet ophalen voor ${file.name}, standaardversie v1 wordt gebruikt: ${err.message}`);
+        }
       }
 
-      const trackTitle = `${baseTitle} (v${driveVersion})`;
+      fileInfos.push({ file, cleanTitle, baseTitle, explicitVersion, version });
+    }
+
+    const activeFiles = deduplicateDriveFiles(fileInfos, log);
+
+    for (const info of activeFiles) {
+      const { file, baseTitle, version } = info;
+      activeDriveIds.add(file.id);
+      const trackTitle = `${baseTitle} (v${version})`;
       const matchingIds = findMatchingTrackIds(playlistTracks, baseTitle);
 
       if (isSynced(state, file.id)) {
@@ -108,12 +122,12 @@ export async function sync(log = console.log) {
         if (storedVersion === null) {
           needsUpdate = (storedTime && fileTime > storedTime) || !storedTime;
         } else {
-          needsUpdate = driveVersion !== storedVersion;
+          needsUpdate = version !== storedVersion;
         }
 
         if (needsUpdate) {
           const oldVersionStr = storedVersion !== null ? `v${storedVersion}` : 'legacy';
-          log(`  [UPDATE] Nieuwe versie gedetecteerd voor ${baseTitle} (${oldVersionStr} → v${driveVersion}), oude track(s) worden verwijderd...`);
+          log(`  [UPDATE] Nieuwe versie gedetecteerd voor ${baseTitle} (${oldVersionStr} → v${version}), oude track(s) worden verwijderd...`);
           for (const matchId of matchingIds) {
             await deleteTrack(accessToken, matchId);
           }
@@ -121,7 +135,7 @@ export async function sync(log = console.log) {
           const driveStream = await getDriveStream(drive, file.id);
           const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
           await addTrackToPlaylist(accessToken, playlistId, track.id, matchingIds);
-          await markSynced(state, file.id, track.id, file.modifiedTime, driveVersion);
+          await markSynced(state, file.id, track.id, file.modifiedTime, version);
           await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
           log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
         } else {
@@ -136,12 +150,12 @@ export async function sync(log = console.log) {
       if (bestMatch) {
         log(`  [RECOVERY] SoundCloud track gevonden voor ${baseTitle} met versie v${bestMatch.version}`);
 
-        if (bestMatch.version === driveVersion) {
+        if (bestMatch.version === version) {
           log(`  [RECOVERY] Lokale status hersteld voor ${trackTitle}. Geen upload nodig.`);
-          await markSynced(state, file.id, bestMatch.id, file.modifiedTime, driveVersion);
+          await markSynced(state, file.id, bestMatch.id, file.modifiedTime, version);
           continue;
         } else {
-          log(`  [RECOVERY-UPDATE] Versieverschil gedetecteerd voor ${baseTitle} (SoundCloud v${bestMatch.version} → Drive v${driveVersion}), oude track(s) worden verwijderd...`);
+          log(`  [RECOVERY-UPDATE] Versieverschil gedetecteerd voor ${baseTitle} (SoundCloud v${bestMatch.version} → Drive v${version}), oude track(s) worden verwijderd...`);
           for (const matchId of matchingIds) {
             await deleteTrack(accessToken, matchId);
           }
@@ -149,7 +163,7 @@ export async function sync(log = console.log) {
           const driveStream = await getDriveStream(drive, file.id);
           const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
           await addTrackToPlaylist(accessToken, playlistId, track.id, matchingIds);
-          await markSynced(state, file.id, track.id, file.modifiedTime, driveVersion);
+          await markSynced(state, file.id, track.id, file.modifiedTime, version);
           await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
           log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
           continue;
@@ -169,7 +183,7 @@ export async function sync(log = console.log) {
       const driveStream = await getDriveStream(drive, file.id);
       const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
       await addTrackToPlaylist(accessToken, playlistId, track.id, matchingIds);
-      await markSynced(state, file.id, track.id, file.modifiedTime, driveVersion);
+      await markSynced(state, file.id, track.id, file.modifiedTime, version);
       await sendNotification(`✅ Nieuwe mix:\n${trackTitle}`);
       log(`  ✓ ${trackTitle} (ID: ${track.id})`);
     }
