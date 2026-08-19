@@ -51,10 +51,12 @@ export async function syncTrack({
   const matchingIds = findMatchingTrackIds(playlistTracks, baseTitle);
   const storedTrackId = getStoredTrackId(state, file.id);
 
-  // Controleer of de track aanwezig is in de SoundCloud playlist
-  const existsOnSoundCloud = storedTrackId
+  // Controleer of de track aanwezig is in de SoundCloud playlist (op ID of op matchende titel)
+  const trackInPlaylistById = storedTrackId
     ? playlistTracks.some(t => String(t.id) === String(storedTrackId))
-    : matchingIds.length > 0;
+    : false;
+  const bestMatch = findBestTrackMatch(playlistTracks, baseTitle);
+  const existsOnSoundCloud = trackInPlaylistById || matchingIds.length > 0;
 
   // Zoek een eerdere state entry voor deze baseTitle (bijv. vorig bestand met andere extensie/fileId)
   const priorStateMatch = findStateEntryByBaseTitle(state, baseTitle);
@@ -107,9 +109,10 @@ export async function syncTrack({
       await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
       log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
     } else {
-      // Bewaar metadata in state indien nog niet aanwezig
-      if (!storedExt || !storedBaseTitle || !storedFilename) {
-        await markSynced(state, file.id, storedTrackId, storedModified, storedVersion ?? version, file.name, ext, baseTitle);
+      // Bewaar metadata in state indien nog niet aanwezig, en werk het SoundCloud track ID bij indien nodig
+      const currentTrackId = trackInPlaylistById ? storedTrackId : (bestMatch ? bestMatch.id : storedTrackId);
+      if (!storedExt || !storedBaseTitle || !storedFilename || currentTrackId !== storedTrackId) {
+        await markSynced(state, file.id, currentTrackId, storedModified, storedVersion ?? version, file.name, ext, baseTitle);
       }
       log(`  [SKIPPED] ${trackTitle} - already synced`);
     }
