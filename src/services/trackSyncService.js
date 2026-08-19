@@ -139,8 +139,6 @@ export async function syncTrack({
     return;
   }
 
-  // Controleer of er een match is in de SoundCloud playlist
-  const bestMatch = findBestTrackMatch(playlistTracks, baseTitle);
   const stateEntryForBestMatch = bestMatch ? findStateEntryByTrackId(state, bestMatch.id) : null;
 
   // Als de SoundCloud track gekoppeld was aan een ander Drive bestand in state
