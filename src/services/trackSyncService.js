@@ -45,16 +45,16 @@ export async function syncTrack({
   artistName,
   log = console.log,
 }) {
-  const { file, baseTitle, version } = info;
+  const { file, baseTitle } = info;
+  let version = info.version;
   const ext = getExtension(file.name);
-  const trackTitle = `${baseTitle} (v${version})`;
-  const matchingIds = findMatchingTrackIds(playlistTracks, baseTitle);
   const storedTrackId = getStoredTrackId(state, file.id);
 
   // Controleer of de track aanwezig is in de SoundCloud playlist (op ID of op matchende titel)
   const trackInPlaylistById = storedTrackId
     ? playlistTracks.some(t => String(t.id) === String(storedTrackId))
     : false;
+  const matchingIds = findMatchingTrackIds(playlistTracks, baseTitle);
   const bestMatch = findBestTrackMatch(playlistTracks, baseTitle);
   const existsOnSoundCloud = trackInPlaylistById || matchingIds.length > 0;
 
@@ -62,6 +62,17 @@ export async function syncTrack({
   const priorStateMatch = findStateEntryByBaseTitle(state, baseTitle);
   const [priorDriveId, priorEntry] = priorStateMatch || [null, null];
   const isReplacementFile = priorDriveId && priorDriveId !== file.id;
+
+  // Voorkom versiedowngrade bij vervanging (bijv. mp3 v8 vervangen door nieuwe wav zonder expliciet versienummer)
+  if (info.explicitVersion === null) {
+    if (isReplacementFile && priorEntry?.version && priorEntry.version > version) {
+      version = priorEntry.version;
+    } else if (bestMatch?.version && bestMatch.version > version) {
+      version = bestMatch.version;
+    }
+  }
+
+  const trackTitle = `${baseTitle} (v${version})`;
 
   if (isSynced(state, file.id)) {
     const storedVersion = getStoredVersion(state, file.id);
