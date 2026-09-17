@@ -95,21 +95,17 @@ export async function syncTrack({
   const bestMatch = findBestTrackMatch(playlistTracks, baseTitle);
   const existsOnSoundCloud = trackInPlaylistById || matchingIds.length > 0;
 
-  // Zoek een eerdere state entry voor deze baseTitle (bijv. vorig bestand met andere extensie/fileId)
-  const priorStateMatch = findStateEntryByBaseTitle(state, baseTitle);
+  // Zoek een eerdere state entry voor deze baseTitle (op baseTitle of via gematchte SoundCloud track)
+  const priorStateMatch = findStateEntryByBaseTitle(state, baseTitle) ||
+    (bestMatch ? findStateEntryByTrackId(state, bestMatch.id) : null);
   const [priorDriveId, priorEntry] = priorStateMatch || [null, null];
-  const isReplacementFile = priorDriveId && priorDriveId !== file.id;
+  const isReplacementFile = Boolean(priorDriveId && priorDriveId !== file.id);
 
-  // Voorkom versiedowngrade bij vervanging (bijv. mp3 v8 vervangen door nieuwe wav zonder expliciet versienummer)
-  if (info.explicitVersion === null) {
-    if (isReplacementFile && priorEntry?.version && priorEntry.version > version) {
-      version = priorEntry.version;
-    } else if (bestMatch?.version && bestMatch.version > version) {
-      version = bestMatch.version;
-    }
+  if (info.explicitVersion !== null) {
+    version = info.explicitVersion;
+  } else if (bestMatch?.version && bestMatch.version > version) {
+    version = bestMatch.version;
   }
-
-  const trackTitle = `${baseTitle} (v${version})`;
 
   if (isSynced(state, file.id)) {
     const storedVersion = getStoredVersion(state, file.id);
@@ -122,29 +118,50 @@ export async function syncTrack({
 
     let needsUpdate = false;
     let updateReason = '';
+    let isContentUpdate = false;
 
     if (!existsOnSoundCloud) {
       needsUpdate = true;
       updateReason = 'track ontbreekt op SoundCloud';
     } else if (storedExt && ext !== storedExt) {
       needsUpdate = true;
+      isContentUpdate = true;
       updateReason = `extensie gewijzigd (${storedExt} → ${ext})`;
     } else if (storedFilename && file.name !== storedFilename) {
       needsUpdate = true;
+      isContentUpdate = true;
       updateReason = `bestandsnaam gewijzigd (${storedFilename} → ${file.name})`;
     } else if (storedVersion === null) {
       needsUpdate = (storedTime && fileTime > storedTime) || !storedTime;
-      if (needsUpdate) updateReason = 'gewijzigde tijd (legacy)';
+      if (needsUpdate) {
+        isContentUpdate = true;
+        updateReason = 'gewijzigde tijd (legacy)';
+      }
     } else if (version !== storedVersion) {
       needsUpdate = true;
       updateReason = `versie v${storedVersion} → v${version}`;
     } else if (fileTime > storedTime) {
       needsUpdate = true;
+      isContentUpdate = true;
       updateReason = 'bestand aangepast in Drive';
     }
 
     if (needsUpdate) {
-      log(`  [UPDATE] Update gedetecteerd voor ${baseTitle} (${updateReason}), nieuwe track wordt geüpload...`);
+      const prevVersion = Math.max(storedVersion ?? 0, bestMatch?.version ?? 0, 1);
+      if (info.explicitVersion !== null) {
+        version = info.explicitVersion;
+      } else if (isContentUpdate && version <= prevVersion) {
+        version = prevVersion + 1;
+      } else if (storedVersion !== null && !isContentUpdate && version === storedVersion) {
+        version = storedVersion;
+      }
+
+      const trackTitle = `${baseTitle} (v${version})`;
+      const reasonDetail = (storedVersion !== null && version !== storedVersion)
+        ? `${updateReason} (v${storedVersion} → v${version})`
+        : updateReason;
+
+      log(`  [UPDATE] Update gedetecteerd voor ${baseTitle} (${reasonDetail}), nieuwe track wordt geüpload...`);
       const toDelete = new Set([...matchingIds, ...(storedTrackId ? [storedTrackId] : [])]);
 
       const track = await uploadAndUpdatePlaylists({
@@ -162,12 +179,12 @@ export async function syncTrack({
       await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
       log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
     } else {
-      // Bewaar metadata in state indien nog niet aanwezig, en werk het SoundCloud track ID bij indien nodig
+      const currentVersion = storedVersion ?? (bestMatch ? bestMatch.version : version);
       const currentTrackId = trackInPlaylistById ? storedTrackId : (bestMatch ? bestMatch.id : storedTrackId);
-      if (!storedExt || !storedBaseTitle || !storedFilename || currentTrackId !== storedTrackId) {
-        await markSynced(state, file.id, currentTrackId, storedModified, storedVersion ?? version, file.name, ext, baseTitle);
+      if (!storedExt || !storedBaseTitle || !storedFilename || currentTrackId !== storedTrackId || storedVersion === null) {
+        await markSynced(state, file.id, currentTrackId, storedModified, currentVersion, file.name, ext, baseTitle);
       }
-      log(`  [SKIPPED] ${trackTitle} - already synced`);
+      log(`  [SKIPPED] ${baseTitle} (v${currentVersion}) - already synced`);
     }
     return;
   }
@@ -175,8 +192,19 @@ export async function syncTrack({
   // Bestand niet in state onder huidig file.id: controleer of het een vervangend bestand is
   if (isReplacementFile) {
     const oldExt = priorEntry?.ext || 'onbekend';
-    log(`  [UPDATE] Vervangend bestand gedetecteerd voor ${baseTitle} (${oldExt} → ${ext}), nieuwe track wordt geüpload...`);
-    const toDelete = new Set([...matchingIds, ...(priorEntry?.scTrackId ? [priorEntry.scTrackId] : [])]);
+    const prevVersion = Math.max(priorEntry?.version ?? 0, bestMatch?.version ?? 0, 1);
+    if (info.explicitVersion !== null) {
+      version = info.explicitVersion;
+    } else if (version <= prevVersion) {
+      version = prevVersion + 1;
+    }
+    const trackTitle = `${baseTitle} (v${version})`;
+    log(`  [UPDATE] Vervangend bestand gedetecteerd voor ${baseTitle} (${oldExt} → ${ext}, v${prevVersion} → v${version}), nieuwe track wordt geüpload...`);
+    const toDelete = new Set([
+      ...matchingIds,
+      ...(priorEntry?.scTrackId ? [priorEntry.scTrackId] : []),
+      ...(bestMatch?.id ? [bestMatch.id] : []),
+    ]);
 
     const track = await uploadAndUpdatePlaylists({
       drive,
@@ -196,35 +224,9 @@ export async function syncTrack({
     return;
   }
 
-  const stateEntryForBestMatch = bestMatch ? findStateEntryByTrackId(state, bestMatch.id) : null;
-
-  // Als de SoundCloud track gekoppeld was aan een ander Drive bestand in state
-  if (bestMatch && stateEntryForBestMatch && stateEntryForBestMatch[0] !== file.id) {
-    const [oldDriveId, oldEntry] = stateEntryForBestMatch;
-    const oldExt = oldEntry?.ext || 'onbekend';
-    log(`  [UPDATE] Nieuw bestand (${ext}) vervangt eerdere track voor ${baseTitle} (SoundCloud track ID: ${bestMatch.id}, ${oldExt}), nieuwe track wordt geüpload...`);
-    const toDelete = new Set([...matchingIds, bestMatch.id]);
-
-    const track = await uploadAndUpdatePlaylists({
-      drive,
-      accessToken,
-      playlistId,
-      file,
-      trackTitle,
-      artistName,
-      toDelete,
-      log,
-    });
-
-    await removeStateEntry(state, oldDriveId);
-    await markSynced(state, file.id, track.id, file.modifiedTime, version, file.name, ext, baseTitle);
-    await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
-    log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
-    return;
-  }
-
   if (bestMatch) {
     log(`  [RECOVERY] SoundCloud track gevonden voor ${baseTitle} met versie v${bestMatch.version}`);
+    const trackTitle = `${baseTitle} (v${version})`;
 
     if (bestMatch.version === version) {
       log(`  [RECOVERY] Lokale status hersteld voor ${trackTitle}. Geen upload nodig.`);
@@ -253,6 +255,7 @@ export async function syncTrack({
   }
 
   // Echt nieuw bestand (of stray opruimen indien aanwezig)
+  const trackTitle = `${baseTitle} (v${version})`;
   const toDelete = new Set(matchingIds);
 
   log(`  ↑ ${trackTitle} …`);
