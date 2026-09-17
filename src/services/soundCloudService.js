@@ -2,7 +2,6 @@ import https from 'https';
 import { fetchWithRetry } from '../utils/fetchWithRetry.js';
 import { getExtension, MIME_TYPES } from './driveService.js';
 
-export const PLAYLIST_NAME = 'CarPlay Mixes';
 export const SC_BASE = 'https://api.soundcloud.com';
 
 function escapeRegExp(string) {
@@ -45,94 +44,15 @@ export function scHeaders(accessToken) {
   return { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' };
 }
 
-export async function ensurePlaylist(accessToken, log) {
-  const res = await fetchWithRetry(`${SC_BASE}/me/playlists?limit=200`, {
-    headers: scHeaders(accessToken),
-  });
-  const playlists = await res.json();
-
-  const existing = playlists.find(p => p.title === PLAYLIST_NAME);
-  if (existing) return existing.id;
-
-  const params = new URLSearchParams();
-  params.append('playlist[title]', PLAYLIST_NAME);
-  params.append('playlist[sharing]', 'private');
-
-  const createRes = await fetchWithRetry(`${SC_BASE}/playlists`, {
-    method: 'POST',
-    headers: { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' },
-    body: params,
-  });
-
-  const data = await createRes.json();
-  log(`  Created playlist "${PLAYLIST_NAME}" (ID: ${data.id})`);
-  return data.id;
-}
-
-export async function addTrackToPlaylist(accessToken, playlistId, trackId, excludeTrackIds = null) {
-  const getRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
-    headers: scHeaders(accessToken),
-  });
-  const playlist = await getRes.json();
-
-  const excludes = new Set();
-  if (excludeTrackIds) {
-    if (Array.isArray(excludeTrackIds)) {
-      excludeTrackIds.forEach(id => excludes.add(String(id)));
-    } else if (typeof excludeTrackIds === 'object' && excludeTrackIds.scTrackId) {
-      excludes.add(String(excludeTrackIds.scTrackId));
-    } else {
-      excludes.add(String(excludeTrackIds));
-    }
-  }
-
-  let trackIds = (playlist.tracks ?? [])
-    .map(t => t.id)
-    .filter(id => id && !excludes.has(String(id)));
-
-  trackIds.push(trackId);
-  trackIds = [...new Set(trackIds)];
-
-  const params = new URLSearchParams();
-  trackIds.forEach(id => params.append('playlist[tracks][][id]', id));
-
-  const putRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
-    method: 'PUT',
-    headers: { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' },
-    body: params,
-  });
-
-  if (!putRes.ok) {
-    const errText = await putRes.text();
-    throw new Error(`Playlist update failed: ${putRes.status} - ${errText}`);
-  }
-}
-
-export async function removeTrackFromPlaylist(accessToken, playlistId, trackId) {
-  const getRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
-    headers: scHeaders(accessToken),
-  });
-  const playlist = await getRes.json();
-
-  const idStr = String(typeof trackId === 'object' ? trackId.scTrackId : trackId);
-  const trackIds = (playlist.tracks ?? [])
-    .map(t => t.id)
-    .filter(id => id && String(id) !== idStr);
-
-  const params = new URLSearchParams();
-  trackIds.forEach(id => params.append('playlist[tracks][][id]', id));
-
-  const putRes = await fetchWithRetry(`${SC_BASE}/playlists/${playlistId}`, {
-    method: 'PUT',
-    headers: { Authorization: `OAuth ${accessToken}`, Accept: 'application/json' },
-    body: params,
-  });
-
-  if (!putRes.ok) {
-    const errText = await putRes.text();
-    throw new Error(`Playlist update failed: ${putRes.status} - ${errText}`);
-  }
-}
+// Re-export playlist management functions from playlistService
+export {
+  PLAYLIST_NAME,
+  ensurePlaylist,
+  addTrackToPlaylist,
+  removeTrackFromPlaylist,
+  updatePlaylistsOnTrackChange,
+  getUserPlaylists,
+} from './playlistService.js';
 
 export async function sendNotification(message) {
   const user = process.env.PUSHOVER_USER_KEY;
@@ -220,9 +140,9 @@ export async function uploadTrack(accessToken, { trackTitle, artistName, driveSt
       res.on('end', () => {
         if (res.statusCode >= 200 && res.statusCode < 300) {
           try { resolve(JSON.parse(body)); }
-          catch { reject(new Error(`Upload failed — SoundCloud returned non-JSON: ${body.slice(0, 500)}`)); }
+          catch { reject(new Error(`Upload failed - SoundCloud returned non-JSON: ${body.slice(0, 500)}`)); }
         } else {
-          reject(new Error(`HTTP ${res.statusCode} — ${body}`));
+          reject(new Error(`HTTP ${res.statusCode} - ${body}`));
         }
       });
     });

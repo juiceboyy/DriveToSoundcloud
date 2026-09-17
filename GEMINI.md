@@ -55,8 +55,7 @@ All configuration is loaded via environment variables (using `dotenv` in develop
 - Each subfolder inside `producing` is treated as an **artist name** (except `Admin` which is skipped).
 - Audio files (`.wav`, `.mp3`, `.aiff`, `.m4a`, `.aac`, `.flac`) inside subfolders are the tracks; the filename without extension becomes the **track title**.
 - Track title sent to SoundCloud is formatted as `"${artistName} - ${rawTitle}"`.
-- Uploads stream directly from Google Drive → SoundCloud using raw `https.request` (not `fetchWithRetry`) — streams are not replayable so retries are not possible.
-- Uploaded tracks are added to a SoundCloud playlist named `CarPlay Mixes` (created if missing). Playlist update reads existing tracks then PUTs the full list — it only appends, never removes.
+- Uploaded tracks are added to a SoundCloud playlist named `CarPlay Mixes` (created if missing) at the top (position 1). When replacing an existing track, its position in any other user playlist is preserved in-place, and in `CarPlay Mixes` it moves to the top. Handled via `src/services/playlistService.js`.
 - **Crawl rules:** The `Admin` subfolder is always skipped. Within each artist folder, if a `Bounces` subfolder exists, audio files are sourced from there; otherwise from the artist folder directly.
 - **Date filter:** Only audio files with a `createdTime` or `modifiedTime` in 2026 or later are processed.
 - **Pushover Notifications:** If both `PUSHOVER_USER_KEY` and `PUSHOVER_APP_TOKEN` are set, mobile push notifications are sent for newly synced mixes (`✅ Nieuwe mix:\n...`) or updated versions (`🔄 Mix geüpdatet:\n...`).

@@ -13,13 +13,50 @@ import {
 } from '../utils/syncState.js';
 import { getExtension, getDriveStream } from './driveService.js';
 import {
-  addTrackToPlaylist,
   deleteTrack,
   uploadTrack,
   findBestTrackMatch,
   findMatchingTrackIds,
   sendNotification,
 } from './soundCloudService.js';
+import { updatePlaylistsOnTrackChange } from './playlistService.js';
+
+/**
+ * Uploadt een nieuwe track, werkt alle playlists bij (bovenaan in CarPlay Mixes, in-place in overige playlists)
+ * en verwijdert daarna pas eventuele oude tracks.
+ */
+async function uploadAndUpdatePlaylists({
+  drive,
+  accessToken,
+  playlistId,
+  file,
+  trackTitle,
+  artistName,
+  toDelete,
+  log,
+}) {
+  const driveStream = await getDriveStream(drive, file.id);
+  const track = await uploadTrack(accessToken, {
+    trackTitle,
+    artistName,
+    driveStream,
+    filename: file.name,
+    fileSize: parseInt(file.size, 10),
+  });
+
+  await updatePlaylistsOnTrackChange(accessToken, {
+    oldTrackIds: Array.from(toDelete),
+    newTrackId: track.id,
+    carPlayPlaylistId: playlistId,
+    log,
+  });
+
+  for (const matchId of toDelete) {
+    await deleteTrack(accessToken, matchId);
+  }
+
+  return track;
+}
 
 /**
  * Synchronizes an individual audio file from Google Drive to SoundCloud.
@@ -107,15 +144,20 @@ export async function syncTrack({
     }
 
     if (needsUpdate) {
-      log(`  [UPDATE] Update gedetecteerd voor ${baseTitle} (${updateReason}), oude track(s) worden vervangen...`);
+      log(`  [UPDATE] Update gedetecteerd voor ${baseTitle} (${updateReason}), nieuwe track wordt geüpload...`);
       const toDelete = new Set([...matchingIds, ...(storedTrackId ? [storedTrackId] : [])]);
-      for (const matchId of toDelete) {
-        await deleteTrack(accessToken, matchId);
-      }
 
-      const driveStream = await getDriveStream(drive, file.id);
-      const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-      await addTrackToPlaylist(accessToken, playlistId, track.id, Array.from(toDelete));
+      const track = await uploadAndUpdatePlaylists({
+        drive,
+        accessToken,
+        playlistId,
+        file,
+        trackTitle,
+        artistName,
+        toDelete,
+        log,
+      });
+
       await markSynced(state, file.id, track.id, file.modifiedTime, version, file.name, ext, baseTitle);
       await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
       log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
@@ -133,17 +175,21 @@ export async function syncTrack({
   // Bestand niet in state onder huidig file.id: controleer of het een vervangend bestand is
   if (isReplacementFile) {
     const oldExt = priorEntry?.ext || 'onbekend';
-    log(`  [UPDATE] Vervangend bestand gedetecteerd voor ${baseTitle} (${oldExt} → ${ext}), oude track(s) worden vervangen...`);
+    log(`  [UPDATE] Vervangend bestand gedetecteerd voor ${baseTitle} (${oldExt} → ${ext}), nieuwe track wordt geüpload...`);
     const toDelete = new Set([...matchingIds, ...(priorEntry?.scTrackId ? [priorEntry.scTrackId] : [])]);
-    for (const matchId of toDelete) {
-      await deleteTrack(accessToken, matchId);
-    }
+
+    const track = await uploadAndUpdatePlaylists({
+      drive,
+      accessToken,
+      playlistId,
+      file,
+      trackTitle,
+      artistName,
+      toDelete,
+      log,
+    });
 
     await removeStateEntry(state, priorDriveId);
-
-    const driveStream = await getDriveStream(drive, file.id);
-    const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-    await addTrackToPlaylist(accessToken, playlistId, track.id, Array.from(toDelete));
     await markSynced(state, file.id, track.id, file.modifiedTime, version, file.name, ext, baseTitle);
     await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
     log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
@@ -156,16 +202,21 @@ export async function syncTrack({
   if (bestMatch && stateEntryForBestMatch && stateEntryForBestMatch[0] !== file.id) {
     const [oldDriveId, oldEntry] = stateEntryForBestMatch;
     const oldExt = oldEntry?.ext || 'onbekend';
-    log(`  [UPDATE] Nieuw bestand (${ext}) vervangt eerdere track voor ${baseTitle} (SoundCloud track ID: ${bestMatch.id}, ${oldExt}), oude track wordt vervangen...`);
+    log(`  [UPDATE] Nieuw bestand (${ext}) vervangt eerdere track voor ${baseTitle} (SoundCloud track ID: ${bestMatch.id}, ${oldExt}), nieuwe track wordt geüpload...`);
     const toDelete = new Set([...matchingIds, bestMatch.id]);
-    for (const matchId of toDelete) {
-      await deleteTrack(accessToken, matchId);
-    }
-    await removeStateEntry(state, oldDriveId);
 
-    const driveStream = await getDriveStream(drive, file.id);
-    const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-    await addTrackToPlaylist(accessToken, playlistId, track.id, Array.from(toDelete));
+    const track = await uploadAndUpdatePlaylists({
+      drive,
+      accessToken,
+      playlistId,
+      file,
+      trackTitle,
+      artistName,
+      toDelete,
+      log,
+    });
+
+    await removeStateEntry(state, oldDriveId);
     await markSynced(state, file.id, track.id, file.modifiedTime, version, file.name, ext, baseTitle);
     await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
     log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
@@ -180,14 +231,20 @@ export async function syncTrack({
       await markSynced(state, file.id, bestMatch.id, file.modifiedTime, version, file.name, ext, baseTitle);
       return;
     } else {
-      log(`  [RECOVERY-UPDATE] Versieverschil gedetecteerd voor ${baseTitle} (SoundCloud v${bestMatch.version} → Drive v${version}), oude track(s) worden verwijderd...`);
-      for (const matchId of matchingIds) {
-        await deleteTrack(accessToken, matchId);
-      }
+      log(`  [RECOVERY-UPDATE] Versieverschil gedetecteerd voor ${baseTitle} (SoundCloud v${bestMatch.version} → Drive v${version}), nieuwe track wordt geüpload...`);
+      const toDelete = new Set([...matchingIds, bestMatch.id]);
 
-      const driveStream = await getDriveStream(drive, file.id);
-      const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-      await addTrackToPlaylist(accessToken, playlistId, track.id, matchingIds);
+      const track = await uploadAndUpdatePlaylists({
+        drive,
+        accessToken,
+        playlistId,
+        file,
+        trackTitle,
+        artistName,
+        toDelete,
+        log,
+      });
+
       await markSynced(state, file.id, track.id, file.modifiedTime, version, file.name, ext, baseTitle);
       await sendNotification(`🔄 Mix geüpdatet:\n${trackTitle}`);
       log(`  ✓ ${trackTitle} (ID: ${track.id}) [REPLACED]`);
@@ -196,18 +253,21 @@ export async function syncTrack({
   }
 
   // Echt nieuw bestand (of stray opruimen indien aanwezig)
-  if (matchingIds.length > 0) {
-    log(`  [CLEANUP] Oude losse track(s) gedetecteerd voor ${baseTitle}, deze worden verwijderd...`);
-    for (const matchId of matchingIds) {
-      await deleteTrack(accessToken, matchId);
-    }
-  }
+  const toDelete = new Set(matchingIds);
 
   log(`  ↑ ${trackTitle} …`);
 
-  const driveStream = await getDriveStream(drive, file.id);
-  const track = await uploadTrack(accessToken, { trackTitle, artistName, driveStream, filename: file.name, fileSize: parseInt(file.size, 10) });
-  await addTrackToPlaylist(accessToken, playlistId, track.id, matchingIds);
+  const track = await uploadAndUpdatePlaylists({
+    drive,
+    accessToken,
+    playlistId,
+    file,
+    trackTitle,
+    artistName,
+    toDelete,
+    log,
+  });
+
   await markSynced(state, file.id, track.id, file.modifiedTime, version, file.name, ext, baseTitle);
   await sendNotification(`✅ Nieuwe mix:\n${trackTitle}`);
   log(`  ✓ ${trackTitle} (ID: ${track.id})`);

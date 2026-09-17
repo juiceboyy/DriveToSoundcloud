@@ -52,7 +52,7 @@ export async function sync(log = console.log) {
     const artistName = subfolder.name;
 
     if (artistName === 'Admin') {
-      log(`[Admin] — skipped`);
+      log(`[Admin] - skipped`);
       continue;
     }
 
@@ -63,7 +63,7 @@ export async function sync(log = console.log) {
     const audioFiles = await listAudioFiles(drive, sourceFolderId);
 
     if (audioFiles.length === 0) continue;
-    log(`[${sourceLabel}] — ${audioFiles.length} track(s)`);
+    log(`[${sourceLabel}] - ${audioFiles.length} track(s)`);
 
     const fileInfos = [];
     for (const file of audioFiles) {
